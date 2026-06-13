@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">JK BMS Demo</string>
+    <string name="hint_password">输入 BMS 密码（用于校验）</string>
+    <string name="btn_scan">开始扫描</string>
+    <string name="btn_connect">连接并读取</string>
+    <string name="title_devices">扫描到的蓝牙设备</string>
+    <string name="title_status">状态</string>
+    <string name="status_idle">待机</string>
+    <string name="title_metrics">实时数据</string>
+</resources>
