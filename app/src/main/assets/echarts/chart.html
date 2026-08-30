@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+    <style>
+        html, body, #chart { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: transparent; box-sizing: border-box; }
+    </style>
+    <script src="echarts.min.js"></script>
+</head>
+<body>
+<div id="chart"></div>
+<script>
+    const root = document.getElementById('chart');
+    const chart = echarts.init(root, null, { renderer: 'canvas', useDirtyRect: false });
+    let configured = false;
+
+    window.updateChart = function(payload) {
+        const text = payload.dark ? '#cbd5e1' : '#475569';
+        const grid = payload.dark ? 'rgba(100,116,139,.28)' : 'rgba(100,116,139,.20)';
+        const axis = payload.dark ? '#64748b' : '#94a3b8';
+        const rawPoints = payload.points || [];
+        const windowSlots = Number(payload.windowSlots) >= 2 ? Number(payload.windowSlots) : null;
+        const windowStepMs = Number(payload.windowStepMs) > 0 ? Number(payload.windowStepMs) : null;
+        const visiblePoints = windowSlots ? rawPoints.slice(-windowSlots) : rawPoints;
+        const pointCount = visiblePoints.length;
+        const windowFull = windowSlots && pointCount >= windowSlots;
+        const maxSlot = windowSlots ? windowSlots - 1 : null;
+        const xOf = index => {
+            if (!windowSlots) return visiblePoints[index][0];
+            if (pointCount <= 1) return maxSlot;
+            if (windowFull) return index;
+            return index * maxSlot / (pointCount - 1);
+        };
+        const data = visiblePoints.map((point, index) => ({
+            id: 'p-' + point[0],
+            name: 'p-' + point[0],
+            value: [xOf(index), point[1]]
+        }));
+        const pieSlices = (payload.pie || []).filter(item => Number(item.value) >= 0);
+        const hasPie = pieSlices.length > 0;
+        const pieTotal = pieSlices.reduce((sum, item) => sum + Number(item.value), 0);
+        const recoverySlice = pieSlices.find(item => item.name === '回收');
+        const recoveryPercent = pieTotal > 0 && recoverySlice
+            ? Number(recoverySlice.value) / pieTotal * 100
+            : 0;
+        const finiteData = data.filter(item => Number.isFinite(Number(item.value[1])));
+        const maxPoint = finiteData.reduce(
+            (best, item) => !best || item.value[1] > best.value[1] ? item : best,
+            null
+        );
+        const minPoint = finiteData.reduce(
+            (best, item) => !best || item.value[1] < best.value[1] ? item : best,
+            null
+        );
+        const markData = [];
+        if (payload.showExtrema && maxPoint) {
+            markData.push({
+                id: 'extrema-max',
+                name: 'MAX',
+                coord: maxPoint.value,
+                value: maxPoint.value[1],
+                symbol: 'circle',
+                symbolSize: 7,
+                itemStyle: { color: payload.color }
+            });
+        }
+        if (payload.showExtrema && minPoint && minPoint !== maxPoint) {
+            markData.push({
+                id: 'extrema-min',
+                name: 'MIN',
+                coord: minPoint.value,
+                value: minPoint.value[1],
+                symbol: 'circle',
+                symbolSize: 7,
+                itemStyle: { color: '#ff9f43' }
+            });
+        }
+        const lineSeries = {
+            id: 'main',
+            name: payload.name,
+            type: 'line',
+            showSymbol: false,
+            smooth: false,
+            connectNulls: false,
+            sampling: 'lttb',
+            animation: true,
+            animationDuration: pointCount >= 2 ? 220 : 0,
+            animationDurationUpdate: pointCount >= 2 ? 420 : 0,
+            animationEasingUpdate: 'linear',
+            lineStyle: { color: payload.color, width: 2.5 },
+            itemStyle: { color: payload.color },
+            areaStyle: payload.area ? { color: payload.areaColor, opacity: .18 } : undefined,
+            markPoint: markData.length ? {
+                silent: true,
+                animation: true,
+                animationDurationUpdate: 420,
+                animationEasingUpdate: 'linear',
+                label: { show: false },
+                data: markData
+            } : undefined,
+            data: data
+        };
+        const series = [lineSeries];
+        if (hasPie) {
+            const pieData = pieTotal > 0
+                ? pieSlices.map(item => ({
+                    name: item.name,
+                    value: Number(item.value),
+                    itemStyle: { color: item.color }
+                }))
+                : [{ name: '暂无', value: 1, itemStyle: { color: grid } }];
+            series.push({
+                id: 'energy-share',
+                name: '能量占比',
+                type: 'pie',
+                center: ['84%', '48%'],
+                radius: '39%',
+                startAngle: 90,
+                clockwise: true,
+                silent: false,
+                animationDuration: 300,
+                animationDurationUpdate: 420,
+                animationEasingUpdate: 'linear',
+                avoidLabelOverlap: true,
+                label: { show: false },
+                labelLine: { show: false },
+                emphasis: { scaleSize: 3 },
+                tooltip: {
+                    trigger: 'item',
+                    formatter: item => item.name + ' ' + Number(item.percent).toFixed(1) + '%'
+                },
+                data: pieData
+            });
+        }
+        const graphics = [];
+        if (payload.showExtrema && maxPoint) {
+            const minText = minPoint
+                ? '  {min|MIN ' + Number(minPoint.value[1]).toFixed(payload.decimals) + '}'
+                : '';
+            graphics.push({
+                id: 'extrema-summary',
+                type: 'text',
+                left: hasPie ? 28 : 48,
+                top: 1,
+                silent: true,
+                style: {
+                    text: '{max|MAX ' + Number(maxPoint.value[1]).toFixed(payload.decimals) + '}' + minText,
+                    rich: {
+                        max: { fill: payload.color, fontSize: 9, fontWeight: 600 },
+                        min: { fill: '#ff9f43', fontSize: 9, fontWeight: 600 }
+                    }
+                }
+            });
+        }
+        chart.setOption({
+            animation: true,
+            animationDuration: pointCount >= 2 ? 220 : 0,
+            animationDurationUpdate: pointCount >= 2 ? 420 : 0,
+            animationEasingUpdate: 'linear',
+            backgroundColor: 'transparent',
+            grid: { left: hasPie ? 28 : 48, right: hasPie ? 112 : 14, top: 24, bottom: 34, containLabel: false },
+            tooltip: {
+                trigger: 'axis',
+                confine: true,
+                backgroundColor: payload.dark ? 'rgba(15,23,42,.94)' : 'rgba(255,255,255,.96)',
+                borderColor: payload.color,
+                textStyle: { color: text, fontSize: 11 },
+                valueFormatter: value => Number(value).toFixed(payload.decimals) + ' ' + payload.unit
+            },
+            xAxis: {
+                type: windowSlots ? 'value' : 'time',
+                boundaryGap: false,
+                min: windowSlots ? 0 : null,
+                max: windowSlots ? maxSlot : null,
+                splitNumber: windowSlots ? 4 : 5,
+                axisLine: { lineStyle: { color: axis } },
+                axisTick: { show: false },
+                axisLabel: {
+                    color: text,
+                    fontSize: 10,
+                    hideOverlap: true,
+                    formatter: windowSlots && windowStepMs
+                        ? value => Math.round((value - maxSlot) * windowStepMs / 1000) + 's'
+                        : undefined
+                },
+                splitLine: { show: false }
+            },
+            yAxis: {
+                type: 'value',
+                scale: true,
+                splitNumber: windowSlots ? 2 : 5,
+                axisLine: { show: false },
+                axisTick: { show: false },
+                axisLabel: { color: text, fontSize: 10, hideOverlap: true },
+                splitLine: { lineStyle: { color: grid } }
+            },
+            legend: { show: false },
+            title: hasPie ? {
+                show: true,
+                text: '回收: ' + recoveryPercent.toFixed(0) + '%',
+                left: '84%',
+                top: '80%',
+                textAlign: 'center',
+                padding: 0,
+                textStyle: {
+                    color: recoverySlice ? recoverySlice.color : '#41cd52',
+                    fontSize: 9,
+                    fontWeight: 600
+                }
+            } : { show: false },
+            graphic: graphics,
+            series: series
+        }, { notMerge: false, lazyUpdate: true });
+        configured = true;
+    };
+
+    window.addEventListener('resize', () => chart.resize());
+    new ResizeObserver(() => chart.resize()).observe(root);
+</script>
+</body>
+</html>

@@ -43,6 +43,32 @@ data class TrendSample(
     val soc: Float
 )
 
+enum class TripMotionState {
+    IDLE,
+    MOVING,
+    PAUSED
+}
+
+data class EnergyTrendPoint(
+    val timestampMs: Long,
+    val kmPerAh: Float
+)
+
+data class EnergyUiState(
+    val motionState: TripMotionState = TripMotionState.IDLE,
+    val tripNetAh: Float = 0f,
+    val tripDischargedAh: Float = 0f,
+    val tripRecoveredAh: Float = 0f,
+    val tripDistanceKm: Float = 0f,
+    val tripKmPerAh: Float? = null,
+    val sessionNetAh: Float = 0f,
+    val sessionDistanceKm: Float = 0f,
+    val sessionKmPerAh: Float? = null,
+    val estimatedRangeKm: Float? = null,
+    val remainingAh: Float? = null,
+    val trend: List<EnergyTrendPoint> = emptyList()
+)
+
 data class BleDeviceUi(
     val address: String,
     val name: String,

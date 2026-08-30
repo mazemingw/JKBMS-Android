@@ -45,6 +45,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -64,9 +65,14 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.yiming.jkbms.model.DetailItem
+import com.yiming.jkbms.model.EnergyUiState
 import com.yiming.jkbms.model.GaugeMetricSource
 import com.yiming.jkbms.model.GpsSignalState
 import com.yiming.jkbms.model.ParsedMetrics
+import com.yiming.jkbms.model.TripMotionState
+import com.yiming.jkbms.ui.components.EChartPoint
+import com.yiming.jkbms.ui.components.EChartPieSlice
+import com.yiming.jkbms.ui.components.EChartsLine
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.cos
@@ -84,6 +90,7 @@ private data class SmokeParticle(
 fun InfoPage(
     modifier: Modifier = Modifier,
     metrics: ParsedMetrics?,
+    energyState: EnergyUiState = EnergyUiState(),
     bleConnected: Boolean = false,
     bleRssi: Int? = null,
     bleActivityFlash: Boolean = false,
@@ -174,6 +181,15 @@ fun InfoPage(
                 BigMetricCard(item = topItems.first { it.source == GaugeMetricSource.SOC }, modifier = Modifier.weight(1f))
                 BigMetricCard(item = topItems.first { it.source == GaugeMetricSource.VOLTAGE }, modifier = Modifier.weight(1f))
             }
+        }
+
+        if (!compactTopMetricsOnly) {
+            EnergyOverviewCard(
+                energyState = energyState,
+                isDark = isDark,
+                hasBmsData = metrics != null,
+                gpsSignalState = gpsSignalState
+            )
         }
 
         if (!compactTopMetricsOnly) {
@@ -361,6 +377,155 @@ private fun BigMetricCard(
     }
 }
 
+@Composable
+private fun EnergyOverviewCard(
+    energyState: EnergyUiState,
+    isDark: Boolean,
+    hasBmsData: Boolean,
+    gpsSignalState: GpsSignalState
+) {
+    var showStats by remember { mutableStateOf(false) }
+    val green = Color(0xFF41CD52)
+    val chartPoints = remember(energyState.trend) {
+        energyState.trend.map { EChartPoint(it.timestampMs, it.kmPerAh) }
+    }
+    val pieSlices = remember(energyState.tripDischargedAh, energyState.tripRecoveredAh) {
+        listOf(
+            EChartPieSlice("放电", energyState.tripDischargedAh, Color(0xFFFF9F43)),
+            EChartPieSlice("回收", energyState.tripRecoveredAh, green)
+        )
+    }
+    val readinessText = when {
+        !hasBmsData -> "等待BMS数据"
+        gpsSignalState == GpsSignalState.OFF -> "请开启GPS"
+        gpsSignalState == GpsSignalState.SEARCHING -> "等待GPS定位"
+        else -> null
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth().height(174.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.fillMaxSize().padding(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("能效", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        formatCompactDistance(energyState.tripDistanceKm),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f)
+                    )
+                }
+                Text(
+                    if (showStats) "查看曲线" else "查看数据",
+                    modifier = Modifier.clickable { showStats = !showStats }.padding(8.dp),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = green
+                )
+            }
+
+            if (showStats) {
+                    Column(
+                        modifier = Modifier.fillMaxSize().clickable { showStats = false },
+                        verticalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            EnergyStat(
+                                label = "本次耗电",
+                                value = formatAmpHours(energyState.tripNetAh),
+                                modifier = Modifier.weight(1f),
+                                color = green
+                            )
+                            EnergyStat(
+                                label = "平均能效",
+                                value = formatEfficiency(energyState.tripKmPerAh),
+                                modifier = Modifier.weight(1f),
+                                color = green
+                            )
+                            EnergyStat(
+                                label = "预计里程",
+                                value = formatRange(energyState.estimatedRangeKm),
+                                modifier = Modifier.weight(1f),
+                                color = green
+                            )
+                        }
+                        Text(
+                            "本次回收 ${formatAmpHours(energyState.tripRecoveredAh)}  ·  运行累计 ${formatAmpHours(energyState.sessionNetAh)}  /  ${formatDistance(energyState.sessionDistanceKm)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (isDark) 0.64f else 0.56f),
+                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                        )
+                    }
+            } else if (chartPoints.size >= 2) {
+                EChartsLine(
+                    points = chartPoints,
+                    name = "近60秒能效",
+                    unit = "km/Ah",
+                    color = green,
+                    modifier = Modifier.fillMaxSize(),
+                    decimals = 2,
+                    showArea = true,
+                    windowMs = 60_000L,
+                    windowStepMs = 500L,
+                    showExtrema = true,
+                    pieSlices = pieSlices
+                )
+            } else {
+                Box(
+                    modifier = Modifier.fillMaxSize().clickable { showStats = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        when {
+                            readinessText != null -> readinessText
+                            energyState.motionState == TripMotionState.IDLE -> "起步后开始生成能效曲线"
+                            else -> "正在积累有效里程与耗电数据…"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EnergyStat(label: String, value: String, modifier: Modifier, color: Color) {
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, style = MaterialTheme.typography.labelMedium)
+        Text(
+            value,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = color,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+private fun formatAmpHours(value: Float): String =
+    if (!value.isFinite()) "--" else String.format(Locale.US, "%.3f Ah", value)
+
+private fun formatEfficiency(value: Float?): String =
+    if (value == null || !value.isFinite()) "计算中" else String.format(Locale.US, "1Ah %.1fkm", value)
+
+private fun formatRange(value: Float?): String =
+    if (value == null || !value.isFinite()) "计算中" else String.format(Locale.US, "%.0f km", value)
+
+private fun formatDistance(value: Float): String =
+    if (!value.isFinite()) "-- km" else String.format(Locale.US, "%.2f km", value)
+
+private fun formatCompactDistance(value: Float): String =
+    if (!value.isFinite()) "--km" else String.format(Locale.US, "%.2fkm", value)
+
 private data class TopMetricItem(
     val source: GaugeMetricSource,
     val title: String,
@@ -424,8 +589,8 @@ private fun buildTopMetricItems(
             iconContainerColor = topCardIconContainerColor,
             badgeColor = topCardBadgeColor,
             badgeText = "A",
-            gaugeValue = abs(currentValue ?: 0f),
-            gaugeMin = 0f,
+            gaugeValue = currentValue ?: 0f,
+            gaugeMin = -currentMax,
             gaugeMax = currentMax,
             gaugeOverflow = abs(currentValue ?: 0f) > currentMax,
             isDischargeState = currentDischarging
@@ -441,8 +606,8 @@ private fun buildTopMetricItems(
             iconContainerColor = powerIconContainerColor,
             badgeColor = topCardBadgeColor,
             badgeText = "W",
-            gaugeValue = abs(powerValue ?: 0f),
-            gaugeMin = 0f,
+            gaugeValue = powerValue ?: 0f,
+            gaugeMin = -powerMax,
             gaugeMax = powerMax,
             gaugeOverflow = abs(powerValue ?: 0f) > powerMax,
             isDischargeState = powerDischarging
@@ -529,12 +694,18 @@ private fun GaugeMetricCard(
     modifier: Modifier = Modifier
 ) {
     val rangeSize = (item.gaugeMax - item.gaugeMin).coerceAtLeast(1f)
+    val zeroCentered = item.source == GaugeMetricSource.CURRENT || item.source == GaugeMetricSource.POWER
     val rawProgress = when (item.source) {
         GaugeMetricSource.VOLTAGE -> (item.gaugeValue - item.gaugeMin) / rangeSize
+        GaugeMetricSource.CURRENT, GaugeMetricSource.POWER -> {
+            0.5f - (item.gaugeValue / (item.gaugeMax.coerceAtLeast(1f) * 2f))
+        }
         else -> item.gaugeValue / item.gaugeMax.coerceAtLeast(1f)
     }
     val rawTarget = rawProgress.coerceIn(0f, 1f)
-    val target = if (!item.gaugeOverflow && item.isDischargeState && item.gaugeValue > 0f) {
+    val target = if (!item.gaugeOverflow && zeroCentered && abs(item.gaugeValue) > 0.001f) {
+        if (item.gaugeValue < 0f) rawTarget.coerceAtLeast(0.53f) else rawTarget.coerceAtMost(0.47f)
+    } else if (!item.gaugeOverflow && item.isDischargeState && item.gaugeValue > 0f) {
         rawTarget.coerceAtLeast(0.03f)
     } else {
         rawTarget
@@ -564,16 +735,19 @@ private fun GaugeMetricCard(
         }
     }
     val animatedProgress = remember { Animatable(0f) }
-    val smokeTransition = rememberInfiniteTransition(label = "smoke")
-    val smokeClock = smokeTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 10000f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 90000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "smokeClock"
-    ).value
+    var smokeClock by remember { mutableStateOf(0f) }
+    LaunchedEffect(Unit) {
+        var startedAtNanos = 0L
+        while (true) {
+            withFrameNanos { frameTimeNanos ->
+                if (startedAtNanos == 0L) startedAtNanos = frameTimeNanos
+                val elapsedSeconds = (frameTimeNanos - startedAtNanos) / 1_000_000_000f
+                // Same motion rate as the original 0..10000 / 90s animation,
+                // without a periodic restart that makes the particle field jump.
+                smokeClock = elapsedSeconds * (10_000f / 90f)
+            }
+        }
+    }
     val latestTarget by rememberUpdatedState(target)
     var initialized by remember { mutableStateOf(false) }
     var lastSource by remember { mutableStateOf(item.source) }
@@ -666,15 +840,19 @@ private fun GaugeMetricCard(
                     size = arcSize,
                     style = androidx.compose.ui.graphics.drawscope.Stroke(width = 8.dp.toPx(), cap = StrokeCap.Round)
                 )
-                drawArc(
-                    color = gaugeAccentColor,
-                    startAngle = startAngle,
-                    sweepAngle = sweepAngle * progress,
-                    useCenter = false,
-                    topLeft = arcTopLeft,
-                    size = arcSize,
-                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 8.dp.toPx(), cap = StrokeCap.Round)
-                )
+                val accentStartProgress = if (zeroCentered) minOf(progress, 0.5f) else 0f
+                val accentSweepProgress = if (zeroCentered) abs(progress - 0.5f) else progress
+                if (accentSweepProgress > 0.001f) {
+                    drawArc(
+                        color = gaugeAccentColor,
+                        startAngle = startAngle + sweepAngle * accentStartProgress,
+                        sweepAngle = sweepAngle * accentSweepProgress,
+                        useCenter = false,
+                        topLeft = arcTopLeft,
+                        size = arcSize,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 8.dp.toPx(), cap = StrokeCap.Round)
+                    )
+                }
 
                 val majorStep = 4
                 for (i in 0..24) {

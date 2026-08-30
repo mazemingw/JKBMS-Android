@@ -9,11 +9,16 @@ import com.yiming.jkbms.model.BottomTab
 import com.yiming.jkbms.model.ChartMetricSource
 import com.yiming.jkbms.model.GaugeMetricSource
 import com.yiming.jkbms.model.GpsSignalState
+import com.yiming.jkbms.model.EnergyTracker
+import com.yiming.jkbms.model.EnergyUiState
 import com.yiming.jkbms.model.ParsedMetrics
 import com.yiming.jkbms.model.ThemeMode
 import com.yiming.jkbms.model.TrendSample
 
 class MainViewModel : ViewModel() {
+    var energyState by mutableStateOf(EnergyUiState())
+        private set
+    val energyTracker = EnergyTracker { energyState = it }
     var passwordInput by mutableStateOf("")
     var statusText by mutableStateOf("待机")
     var scanButtonText by mutableStateOf("开始扫描")

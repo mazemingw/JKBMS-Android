@@ -22,6 +22,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -89,6 +90,8 @@ class MainActivity : ComponentActivity() {
     private var authenticated = false
     private var currentFrameCounter: Byte = 0
     private val frameBuffer = mutableListOf<Byte>()
+    @Volatile private var cellRequestInFlight = false
+    @Volatile private var cellRequestStartedAtMs = 0L
     private var autoReconnectAddress: String? = null
     private var autoConnecting = false
     private var connectedAddress: String? = null
@@ -232,33 +235,17 @@ class MainActivity : ComponentActivity() {
     private val pollTask = object : Runnable {
         override fun run() {
             if (gatt != null && authenticated) {
-                sendCommand(COMMAND_CELL_INFO)
-                uiHandler.postDelayed(this, 3000)
+                requestCellInfo()
+                uiHandler.postDelayed(this, CELL_POLL_INTERVAL_MS)
             }
         }
     }
 
-    private val chartRecordTask = object : Runnable {
-        override fun run() {
-            if (!chartRecording) return
-            latestMetrics?.let { metrics ->
-                appendTrendSample(
-                    TrendSample(
-                        timestampMs = System.currentTimeMillis(),
-                        voltage = metrics.totalVoltage,
-                        current = metrics.current,
-                        power = metrics.power,
-                        soc = metrics.soc.toFloat()
-                    )
-                )
-            }
-            uiHandler.postDelayed(this, 1000L)
-        }
-    }
     private var mockDriveTick: Int = 0
     private var mockDriveSoc: Float = 23.0f
     private var mockRuntimeSeconds: Long = 2_963_445L
     private var mockGpsSpeedKmhValue: Float = 0f
+    private var lastRealMetrics: ParsedMetrics? = null
     private var lastMockPhase: String? = null
     private val mockDriveTask = object : Runnable {
         override fun run() {
@@ -270,7 +257,7 @@ class MainActivity : ComponentActivity() {
                 showToast("MOCK阶段：$phase")
             }
             val metrics = buildMockDrivingMetrics(tick)
-            latestMetrics = metrics
+            acceptMetrics(metrics)
             updateMockGpsState(tick)
             uiHandler.postDelayed(this, 1000L)
         }
@@ -299,15 +286,27 @@ class MainActivity : ComponentActivity() {
     private var gpsUpdating = false
     private var locationPermissionPrompted = false
     private var lastGpsUpdateAtMs: Long = 0L
+    private var lastGpsStartAtMs: Long = 0L
+    private var gpsSearchStartedAtMs: Long = 0L
     private val gpsTimeoutTask = object : Runnable {
         override fun run() {
-            if (!showSpeedCard || !gpsUpdating) return
-            val stale = System.currentTimeMillis() - lastGpsUpdateAtMs > 9000L
-            if (stale) {
-                gpsSignalState = GpsSignalState.SEARCHING
+            if (!gpsEnabled || !gpsUpdating) return
+            val now = System.currentTimeMillis()
+            val stale = now - lastGpsUpdateAtMs > GPS_FIX_TIMEOUT_MS
+            val searchingTooLong = gpsSignalState == GpsSignalState.SEARCHING &&
+                now - gpsSearchStartedAtMs > GPS_FIX_TIMEOUT_MS
+            if (stale || searchingTooLong) {
                 gpsSpeedKmh = 0f
+                viewModel.energyTracker.invalidateLocation()
+                restartGpsUpdates()
+                return
             }
-            uiHandler.postDelayed(this, 3000)
+            uiHandler.postDelayed(this, GPS_WATCHDOG_INTERVAL_MS)
+        }
+    }
+    private val gpsRetryTask = Runnable {
+        if (gpsEnabled && !mockChargingSample) {
+            applyGpsTrackingState(forceRestart = true)
         }
     }
     private val gpsListener = object : LocationListener {
@@ -315,16 +314,32 @@ class MainActivity : ComponentActivity() {
             lastGpsUpdateAtMs = System.currentTimeMillis()
             val speed = if (location.hasSpeed()) location.speed * 3.6f else 0f
             gpsSpeedKmh = speed
-            gpsSignalState = when {
-                !location.hasAccuracy() -> GpsSignalState.SEARCHING
-                location.accuracy <= 60f -> GpsSignalState.READY
-                else -> GpsSignalState.SEARCHING
+            val accurateEnough = !location.hasAccuracy() || location.accuracy <= GPS_ENERGY_MAX_ACCURACY_M
+            val speedAccurateEnough = !location.hasSpeedAccuracy() ||
+                location.speedAccuracyMetersPerSecond <= GPS_ENERGY_MAX_SPEED_ACCURACY_MPS
+            val usableForEnergy = location.hasSpeed() && accurateEnough && speedAccurateEnough
+            updateGpsSignalState(if (usableForEnergy) GpsSignalState.READY else GpsSignalState.SEARCHING)
+            if (usableForEnergy) {
+                viewModel.energyTracker.onSpeedSample(
+                    speedKmh = speed,
+                    elapsedMs = location.elapsedRealtimeNanos / 1_000_000L,
+                    wallTimeMs = location.time.takeIf { it > 0L } ?: System.currentTimeMillis()
+                )
+            } else {
+                viewModel.energyTracker.invalidateLocation()
             }
         }
 
         override fun onProviderDisabled(provider: String) {
-            gpsSignalState = if (gpsEnabled) GpsSignalState.SEARCHING else GpsSignalState.OFF
+            updateGpsSignalState(if (gpsEnabled) GpsSignalState.SEARCHING else GpsSignalState.OFF)
             gpsSpeedKmh = if (gpsEnabled) 0f else null
+            viewModel.energyTracker.invalidateLocation()
+        }
+
+        override fun onProviderEnabled(provider: String) {
+            if (provider == LocationManager.GPS_PROVIDER && gpsEnabled) {
+                restartGpsUpdates()
+            }
         }
     }
 
@@ -450,6 +465,7 @@ class MainActivity : ComponentActivity() {
                             BottomTab.INFO -> InfoPage(
                                     modifier = Modifier.fillMaxSize(),
                                     metrics = latestMetrics,
+                                    energyState = viewModel.energyState,
                                     bleConnected = bleConnected,
                                     bleRssi = bleSignalRssi,
                                     bleActivityFlash = bleActivityFlash,
@@ -584,21 +600,26 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        viewModel.energyTracker.setCollecting(true)
         applyGpsTrackingState()
-        if (chartRecording) {
-            uiHandler.removeCallbacks(chartRecordTask)
-            uiHandler.post(chartRecordTask)
-        }
         if (mockChargingSample) {
             uiHandler.removeCallbacks(mockDriveTask)
             uiHandler.post(mockDriveTask)
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        val gpsSessionAgeMs = System.currentTimeMillis() - lastGpsStartAtMs
+        if (gpsSessionAgeMs > GPS_RESUME_RESTART_DEBOUNCE_MS) {
+            applyGpsTrackingState(forceRestart = true)
+        }
+    }
+
     override fun onStop() {
         super.onStop()
+        viewModel.energyTracker.setCollecting(false)
         stopGpsUpdates()
-        uiHandler.removeCallbacks(chartRecordTask)
         uiHandler.removeCallbacks(mockDriveTask)
     }
 
@@ -609,7 +630,6 @@ class MainActivity : ComponentActivity() {
         stopGpsUpdates()
         uiHandler.removeCallbacks(clearBleFlashTask)
         uiHandler.removeCallbacks(pollRssiTask)
-        uiHandler.removeCallbacks(chartRecordTask)
         uiHandler.removeCallbacks(mockDriveTask)
         uiHandler.removeCallbacks(bleDataWatchdogTask)
     }
@@ -774,7 +794,9 @@ class MainActivity : ComponentActivity() {
         disconnectGatt()
         authenticated = false
         frameBuffer.clear()
-        latestMetrics = null
+        resetCellRequestState()
+        lastRealMetrics = null
+        if (!mockChargingSample) latestMetrics = null
         applyGpsTrackingState()
         bleConnected = false
         bleActivityFlash = false
@@ -800,7 +822,9 @@ class MainActivity : ComponentActivity() {
         gatt = null
         writeCharacteristic = null
         notifyCharacteristic = null
-        latestMetrics = null
+        resetCellRequestState()
+        lastRealMetrics = null
+        if (!mockChargingSample) latestMetrics = null
         applyGpsTrackingState()
         bleConnected = false
         bleSignalRssi = null
@@ -823,12 +847,14 @@ class MainActivity : ComponentActivity() {
                 setStatus("已断开连接。")
                 bleAutoReconnecting = false
                 authenticated = false
+                resetCellRequestState()
                 autoConnecting = false
                 uiHandler.removeCallbacks(pollTask)
                 uiHandler.removeCallbacks(pollRssiTask)
                 uiHandler.removeCallbacks(clearBleFlashTask)
                 stopBleWatchdog()
-                latestMetrics = null
+                lastRealMetrics = null
+                if (!mockChargingSample) latestMetrics = null
                 applyGpsTrackingState()
                 bleConnected = false
                 bleSignalRssi = null
@@ -928,6 +954,7 @@ class MainActivity : ComponentActivity() {
         if (frameBuffer.size >= MIN_FRAME_SIZE) {
             val frame = frameBuffer.take(MIN_FRAME_SIZE).toByteArray()
             frameBuffer.clear()
+            resetCellRequestState()
             if (!validateCrc(frame)) {
                 setStatus("收到数据但 CRC 校验失败。")
                 return
@@ -958,9 +985,9 @@ class MainActivity : ComponentActivity() {
                             .putString(PREF_LAST_PASSWORD, typedPassword)
                             .apply()
                     }
-                    sendCommand(COMMAND_CELL_INFO)
+                    requestCellInfo()
                     uiHandler.removeCallbacks(pollTask)
-                    uiHandler.postDelayed(pollTask, 3000)
+                    uiHandler.postDelayed(pollTask, CELL_POLL_INTERVAL_MS)
                     startBleWatchdog()
                 } else {
                     autoConnecting = false
@@ -972,9 +999,12 @@ class MainActivity : ComponentActivity() {
             FRAME_TYPE_CELL_INFO -> {
                 if (!authenticated) return
                 val parsed = parseCellInfo(frame)
-                latestMetrics = parsed
+                lastRealMetrics = parsed
+                if (!mockChargingSample) {
+                    acceptMetrics(parsed)
+                }
                 applyGpsTrackingState()
-                setStatus("已更新电池数据。")
+                setStatus(if (mockChargingSample) "已缓存真实电池数据（MOCK显示中）。" else "已更新电池数据。")
             }
 
             FRAME_TYPE_SETTINGS -> if (authenticated) setStatus("收到设置帧。")
@@ -1006,6 +1036,19 @@ class MainActivity : ComponentActivity() {
             gatt.writeCharacteristic(characteristic)
         }
         markBleActivity()
+    }
+
+    private fun requestCellInfo() {
+        val now = SystemClock.elapsedRealtime()
+        if (cellRequestInFlight && now - cellRequestStartedAtMs < CELL_REQUEST_TIMEOUT_MS) return
+        cellRequestInFlight = true
+        cellRequestStartedAtMs = now
+        sendCommand(COMMAND_CELL_INFO)
+    }
+
+    private fun resetCellRequestState() {
+        cellRequestInFlight = false
+        cellRequestStartedAtMs = 0L
     }
 
     private fun markBleActivity() {
@@ -1183,25 +1226,46 @@ class MainActivity : ComponentActivity() {
         }
         chartSamples = emptyList()
         chartRecording = true
-        uiHandler.removeCallbacks(chartRecordTask)
-        uiHandler.post(chartRecordTask)
         setStatus("图表录制已开始。")
     }
 
     private fun stopChartRecording(silent: Boolean = false) {
         chartRecording = false
-        uiHandler.removeCallbacks(chartRecordTask)
         if (!silent) {
             setStatus("图表录制已停止，可回显最近一分钟数据。")
         }
     }
 
     private fun appendTrendSample(sample: TrendSample) {
-        chartSamples = chartSamples + sample
+        chartSamples = (chartSamples + sample).takeLast(MAX_CHART_SAMPLES)
+    }
+
+    private fun acceptMetrics(metrics: ParsedMetrics) {
+        latestMetrics = metrics
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val nowWall = System.currentTimeMillis()
+        viewModel.energyTracker.onBmsSample(
+            currentA = metrics.current,
+            capacityRemainingAh = metrics.capacityRemainingAh,
+            elapsedMs = nowElapsed,
+            wallTimeMs = nowWall
+        )
+        if (chartRecording) {
+            appendTrendSample(
+                TrendSample(
+                    timestampMs = nowWall,
+                    voltage = metrics.totalVoltage,
+                    current = metrics.current,
+                    power = metrics.power,
+                    soc = metrics.soc.toFloat()
+                )
+            )
+        }
     }
 
     private fun startMockDriving() {
         mockChargingSample = true
+        viewModel.energyTracker.resetSession()
         mockDriveTick = 0
         lastMockPhase = null
         mockDriveSoc = 23.0f
@@ -1211,7 +1275,7 @@ class MainActivity : ComponentActivity() {
             startChartRecording()
         }
         val first = buildMockDrivingMetrics(mockDriveTick++)
-        latestMetrics = first
+        acceptMetrics(first)
         updateMockGpsState(0)
         uiHandler.removeCallbacks(mockDriveTask)
         uiHandler.post(mockDriveTask)
@@ -1223,8 +1287,11 @@ class MainActivity : ComponentActivity() {
         mockChargingSample = false
         lastMockPhase = null
         uiHandler.removeCallbacks(mockDriveTask)
+        viewModel.energyTracker.resetSession()
+        lastRealMetrics?.let(::acceptMetrics)
         gpsSignalState = GpsSignalState.OFF
         gpsSpeedKmh = null
+        viewModel.energyTracker.invalidateLocation()
         showToast("MOCK行车已停止")
         setStatus("已停止 MOCK 行车数据。")
     }
@@ -1245,7 +1312,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateMockGpsState(tick: Int) {
-        if (!showSpeedCard || !gpsEnabled) {
+        if (!gpsEnabled) {
             gpsSignalState = GpsSignalState.OFF
             gpsSpeedKmh = null
             return
@@ -1261,6 +1328,11 @@ class MainActivity : ComponentActivity() {
         mockGpsSpeedKmhValue += (target - mockGpsSpeedKmhValue) * 0.36f
         gpsSpeedKmh = mockGpsSpeedKmhValue
         gpsSignalState = GpsSignalState.READY
+        viewModel.energyTracker.onSpeedSample(
+            speedKmh = mockGpsSpeedKmhValue,
+            elapsedMs = SystemClock.elapsedRealtime(),
+            wallTimeMs = System.currentTimeMillis()
+        )
     }
 
     private fun buildMockDrivingMetrics(tick: Int): ParsedMetrics {
@@ -1357,47 +1429,76 @@ class MainActivity : ComponentActivity() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun applyGpsTrackingState() {
-        if (!showSpeedCard || !gpsEnabled) {
+    private fun applyGpsTrackingState(forceRestart: Boolean = false) {
+        if (!gpsEnabled) {
             stopGpsUpdates()
-            gpsSignalState = GpsSignalState.OFF
+            updateGpsSignalState(GpsSignalState.OFF)
             gpsSpeedKmh = null
+            viewModel.energyTracker.invalidateLocation()
             return
         }
         if (mockChargingSample) {
             stopGpsUpdates()
             return
         }
-        startGpsUpdates()
+        startGpsUpdates(forceRestart)
     }
 
     @SuppressLint("MissingPermission")
-    private fun startGpsUpdates() {
-        if (gpsUpdating) return
+    private fun startGpsUpdates(forceRestart: Boolean = false) {
+        if (gpsUpdating) {
+            if (!forceRestart) return
+            stopGpsUpdates()
+        }
         if (!hasFineLocationPermission()) {
             if (!locationPermissionPrompted) {
                 locationPermissionPrompted = true
                 locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
             } else {
-                gpsSignalState = GpsSignalState.OFF
+                updateGpsSignalState(GpsSignalState.OFF)
                 gpsSpeedKmh = null
             }
             return
         }
-        gpsUpdating = true
-        lastGpsUpdateAtMs = System.currentTimeMillis()
-        gpsSignalState = GpsSignalState.SEARCHING
-        locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, gpsListener)
+        val now = System.currentTimeMillis()
+        lastGpsStartAtMs = now
+        lastGpsUpdateAtMs = now
+        gpsSearchStartedAtMs = now
+        updateGpsSignalState(GpsSignalState.SEARCHING)
+        try {
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, gpsListener)
+            gpsUpdating = true
+        } catch (_: RuntimeException) {
+            gpsUpdating = false
+            gpsSpeedKmh = 0f
+            uiHandler.removeCallbacks(gpsRetryTask)
+            uiHandler.postDelayed(gpsRetryTask, GPS_RETRY_DELAY_MS)
+            return
+        }
         uiHandler.removeCallbacks(gpsTimeoutTask)
-        uiHandler.postDelayed(gpsTimeoutTask, 3000)
+        uiHandler.postDelayed(gpsTimeoutTask, GPS_WATCHDOG_INTERVAL_MS)
+    }
+
+    private fun restartGpsUpdates() {
+        if (!gpsEnabled || mockChargingSample) return
+        stopGpsUpdates()
+        startGpsUpdates()
+    }
+
+    private fun updateGpsSignalState(state: GpsSignalState) {
+        if (state == GpsSignalState.SEARCHING && gpsSignalState != GpsSignalState.SEARCHING) {
+            gpsSearchStartedAtMs = System.currentTimeMillis()
+        }
+        gpsSignalState = state
     }
 
     @SuppressLint("MissingPermission")
     private fun stopGpsUpdates() {
+        uiHandler.removeCallbacks(gpsTimeoutTask)
+        uiHandler.removeCallbacks(gpsRetryTask)
         if (!gpsUpdating) return
         gpsUpdating = false
         locationManager.removeUpdates(gpsListener)
-        uiHandler.removeCallbacks(gpsTimeoutTask)
     }
 
     companion object {
@@ -1428,6 +1529,15 @@ class MainActivity : ComponentActivity() {
         private const val BLE_DATA_TIMEOUT_MS = 3_000L
         private const val BLE_WATCHDOG_INTERVAL_MS = 1_000L
         private const val BLE_RECONNECT_RSSI_MIN_DBM = -90
+        private const val CELL_POLL_INTERVAL_MS = 500L
+        private const val CELL_REQUEST_TIMEOUT_MS = 1_500L
+        private const val GPS_FIX_TIMEOUT_MS = 5_000L
+        private const val GPS_WATCHDOG_INTERVAL_MS = 1_500L
+        private const val GPS_RETRY_DELAY_MS = 1_500L
+        private const val GPS_RESUME_RESTART_DEBOUNCE_MS = 1_000L
+        private const val GPS_ENERGY_MAX_ACCURACY_M = 60f
+        private const val GPS_ENERGY_MAX_SPEED_ACCURACY_MPS = 5f
+        private const val MAX_CHART_SAMPLES = 7_200
 
         private val JK_SERVICE_UUID: UUID = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
         private val JK_CHARACTERISTIC_UUID: UUID = UUID.fromString("0000ffe1-0000-1000-8000-00805f9b34fb")
