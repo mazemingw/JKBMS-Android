@@ -1,10 +1,12 @@
 # JKBMS-Android
 
+[简体中文](README.md) | [English](README_EN.md)
+
 JKBMS-Android 是一个使用 Kotlin 与 Jetpack Compose 编写的极空（JK）BMS 第三方 Android 客户端。手机可以通过 BLE 直接连接保护板，读取并展示电芯、电流、电压、功率、温度、SOC、告警等数据，不依赖厂商云服务。
 
-当前版本：`1.2.7 (16)`，最低支持 Android 8.1（API 27）。
+当前版本：`1.2.8 (17)`，最低支持 Android 8.1（API 27）。
 
-版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+版本变化见 [CHANGELOG.md](CHANGELOG.md)，英文版见 [CHANGELOG_EN.md](CHANGELOG_EN.md)。
 
 > 本项目不是极空官方应用。不同硬件或固件版本的协议可能存在差异，涉及车辆与电池安全的判断应以 BMS、仪表和实际测量结果为准。
 
@@ -161,6 +163,14 @@ Debug APK 输出位置：
 ```text
 app/build/outputs/apk/debug/app-debug.apk
 ```
+
+仓库中的正式签名版本位于：
+
+```text
+app/release/app-release.apk
+```
+
+建议普通用户优先从 [GitHub Releases](https://github.com/mazemingw/JKBMS-Android/releases) 下载正式签名 APK；同一签名下的后续版本可以直接覆盖升级。
 
 连接手机后可覆盖安装：
 
