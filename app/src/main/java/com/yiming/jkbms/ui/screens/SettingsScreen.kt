@@ -14,12 +14,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,6 +41,13 @@ fun SettingsPage(
     onThemeModeChange: (ThemeMode) -> Unit,
     showSpeedCard: Boolean,
     onShowSpeedCardChange: (Boolean) -> Unit,
+    showEnergyPanel: Boolean,
+    onShowEnergyPanelChange: (Boolean) -> Unit,
+    onClearTotalEnergy: () -> Unit,
+    showMockButton: Boolean,
+    onShowMockButtonChange: (Boolean) -> Unit,
+    backgroundCollectionEnabled: Boolean,
+    onBackgroundCollectionChange: (Boolean) -> Unit,
     splitScreenInfoOnly: Boolean,
     onSplitScreenInfoOnlyChange: (Boolean) -> Unit,
     gaugeEnabled: Boolean,
@@ -55,6 +64,26 @@ fun SettingsPage(
     val currentMaxTextState = remember { mutableStateOf(gaugeCurrentMax.toString()) }
     val powerMaxTextState = remember { mutableStateOf(gaugePowerMax.toString()) }
     val voltageMaxTextState = remember { mutableStateOf(gaugeVoltageMax.toString()) }
+    val showClearTotalDialog = remember { mutableStateOf(false) }
+
+    if (showClearTotalDialog.value) {
+        AlertDialog(
+            onDismissRequest = { showClearTotalDialog.value = false },
+            title = { Text("清除 TOTAL 总计？") },
+            text = { Text("累计里程、累计放电和累计回收将从零重新计算，当前 TRIP A 不受影响。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearTotalDialog.value = false
+                        onClearTotalEnergy()
+                    }
+                ) { Text("确认清除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearTotalDialog.value = false }) { Text("取消") }
+            }
+        )
+    }
 
     Column(
         modifier = modifier
@@ -85,6 +114,29 @@ fun SettingsPage(
                     )
                 }
                 Switch(checked = useAppFont, onCheckedChange = onFontToggle)
+            }
+        }
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("首页 MOCK 按钮", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "关闭后隐藏首页右下角测试入口；正在运行的 MOCK 也会停止",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                    )
+                }
+                Switch(checked = showMockButton, onCheckedChange = onShowMockButtonChange)
             }
         }
         Card(
@@ -136,6 +188,74 @@ fun SettingsPage(
                     )
                 }
                 Switch(checked = showSpeedCard, onCheckedChange = onShowSpeedCardChange)
+            }
+        }
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f))
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("能耗面板", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "在信息页显示曲线、TRIP A 与 TOTAL 能效卡片",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                        )
+                    }
+                    Switch(checked = showEnergyPanel, onCheckedChange = onShowEnergyPanelChange)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "清除累计里程与累计能耗",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                    )
+                    TextButton(onClick = { showClearTotalDialog.value = true }) {
+                        Text("清除 TOTAL")
+                    }
+                }
+            }
+        }
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("后台能耗采集", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "持续通知保持蓝牙、GPS 与能耗积分运行；会增加耗电，部分系统还需允许应用后台运行",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                    )
+                }
+                Switch(
+                    checked = backgroundCollectionEnabled,
+                    onCheckedChange = onBackgroundCollectionChange
+                )
             }
         }
         Card(

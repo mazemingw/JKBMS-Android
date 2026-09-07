@@ -22,7 +22,8 @@ class EnergyTrackerTest {
         }
 
         assertEquals(TripMotionState.MOVING, state.motionState)
-        assertEquals(1f, state.tripNetAh, 0.002f)
+        // The first two GPS fixes establish continuity before current integration starts.
+        assertEquals(359f / 360f, state.tripNetAh, 0.002f)
         assertEquals(3.6f, state.tripDistanceKm, 0.02f)
         assertEquals(3.6f, state.tripKmPerAh!!, 0.04f)
         assertEquals(36f, state.estimatedRangeKm!!, 0.5f)
@@ -125,7 +126,104 @@ class EnergyTrackerTest {
         tracker.onBmsSample(-10f, 10f, 21_000L, 21_000L)
         assertEquals(tripAhBeforeResume, state.tripNetAh, 0.00001f)
 
+        tracker.onSpeedSample(36f, 21_500L, 21_500L)
         tracker.onBmsSample(-10f, 10f, 21_500L, 21_500L)
+        assertEquals(tripAhBeforeResume, state.tripNetAh, 0.00001f)
+
+        tracker.onBmsSample(-10f, 10f, 22_000L, 22_000L)
         assertEquals(10f * 0.5f / 3_600f, state.tripNetAh - tripAhBeforeResume, 0.0001f)
+    }
+
+    @Test
+    fun gpsRecoveryRequiresTwoFreshFixesAndNeverBridgesTheOutage() {
+        var state = EnergyUiState()
+        val tracker = EnergyTracker { state = it }
+        tracker.setCollecting(true)
+
+        for (second in 0..10) {
+            val elapsed = second * 1_000L
+            tracker.onSpeedSample(36f, elapsed, elapsed)
+            tracker.onBmsSample(-30f, 10f, elapsed, elapsed)
+        }
+        tracker.invalidateLocation(15_000L)
+        tracker.onBmsSample(-30f, 10f, 120_000L, 120_000L)
+        val beforeRecovery = state.tripNetAh
+
+        tracker.onSpeedSample(80f, 120_000L, 120_000L)
+        tracker.onBmsSample(-30f, 10f, 120_000L, 120_000L)
+        assertEquals(beforeRecovery, state.tripNetAh, 0.00001f)
+
+        tracker.onSpeedSample(36f, 121_000L, 121_000L)
+        tracker.onBmsSample(-30f, 10f, 121_000L, 121_000L)
+        assertEquals(beforeRecovery, state.tripNetAh, 0.00001f)
+
+        tracker.onBmsSample(-30f, 10f, 121_500L, 121_500L)
+        assertEquals(30f * 0.5f / 3_600f, state.tripNetAh - beforeRecovery, 0.0001f)
+    }
+
+    @Test
+    fun unavailableGpsAdvancesTripIntoPausedStateWithoutAddingEnergy() {
+        var state = EnergyUiState()
+        val tracker = EnergyTracker { state = it }
+        tracker.setCollecting(true)
+
+        for (second in 0..5) {
+            val elapsed = second * 1_000L
+            tracker.onSpeedSample(20f, elapsed, elapsed)
+            tracker.onBmsSample(-10f, 10f, elapsed, elapsed)
+        }
+        val beforeLoss = state.tripNetAh
+        tracker.invalidateLocation(6_000L)
+        tracker.invalidateLocation(22_000L)
+        tracker.onBmsSample(-10f, 10f, 22_000L, 22_000L)
+
+        assertEquals(TripMotionState.PAUSED, state.motionState)
+        assertEquals(beforeLoss, state.tripNetAh, 0.00001f)
+    }
+
+    @Test
+    fun totalRestoresAcrossRunsAndClearDoesNotResetTripA() {
+        var state = EnergyUiState()
+        val tracker = EnergyTracker { state = it }
+        tracker.restoreTotal(dischargedAh = 2f, recoveredAh = 0.5f, distanceKm = 6f)
+        tracker.setCollecting(true)
+
+        for (second in 0..10) {
+            val elapsed = second * 1_000L
+            tracker.onSpeedSample(36f, elapsed, elapsed)
+            tracker.onBmsSample(-10f, 10f, elapsed, elapsed)
+        }
+
+        assertTrue(state.totalDistanceKm > 6f)
+        assertTrue(state.totalNetAh > 1.5f)
+        assertNotNull(state.totalKmPerAh)
+        val tripDistance = state.tripDistanceKm
+        val tripAh = state.tripNetAh
+
+        tracker.clearTotal()
+
+        assertEquals(0f, state.totalDistanceKm, 0f)
+        assertEquals(0f, state.totalNetAh, 0f)
+        assertEquals(tripDistance, state.tripDistanceKm, 0f)
+        assertEquals(tripAh, state.tripNetAh, 0f)
+    }
+
+    @Test
+    fun mockStyleCollectionCanBeExcludedFromTotal() {
+        var state = EnergyUiState()
+        val tracker = EnergyTracker { state = it }
+        tracker.restoreTotal(dischargedAh = 1f, recoveredAh = 0.2f, distanceKm = 3f)
+        tracker.setAccumulateTotal(false)
+        tracker.setCollecting(true)
+
+        for (second in 0..10) {
+            val elapsed = second * 1_000L
+            tracker.onSpeedSample(36f, elapsed, elapsed)
+            tracker.onBmsSample(-10f, 10f, elapsed, elapsed)
+        }
+
+        assertEquals(3f, state.totalDistanceKm, 0f)
+        assertEquals(0.8f, state.totalNetAh, 0.00001f)
+        assertTrue(state.tripDistanceKm > 0f)
     }
 }

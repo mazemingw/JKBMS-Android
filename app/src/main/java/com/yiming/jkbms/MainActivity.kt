@@ -28,17 +28,32 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.yiming.jkbms.model.BleDeviceUi
@@ -95,6 +110,10 @@ class MainActivity : ComponentActivity() {
     private var autoReconnectAddress: String? = null
     private var autoConnecting = false
     private var connectedAddress: String? = null
+    private var appInForeground = false
+    private var pendingBackgroundCollectionEnable = false
+    private var lastBleForegroundRecoveryAtMs = 0L
+    private var lastTotalPersistAtMs = 0L
 
     private var passwordInput: String
         get() = viewModel.passwordInput
@@ -151,10 +170,25 @@ class MainActivity : ComponentActivity() {
         set(value) {
             viewModel.showSpeedCard = value
         }
+    private var showEnergyPanel: Boolean
+        get() = viewModel.showEnergyPanel
+        set(value) {
+            viewModel.showEnergyPanel = value
+        }
+    private var showMockButton: Boolean
+        get() = viewModel.showMockButton
+        set(value) {
+            viewModel.showMockButton = value
+        }
     private var splitScreenInfoOnly: Boolean
         get() = viewModel.splitScreenInfoOnly
         set(value) {
             viewModel.splitScreenInfoOnly = value
+        }
+    private var backgroundCollectionEnabled: Boolean
+        get() = viewModel.backgroundCollectionEnabled
+        set(value) {
+            viewModel.backgroundCollectionEnabled = value
         }
     private var gpsEnabled: Boolean
         get() = viewModel.gpsEnabled
@@ -271,12 +305,12 @@ class MainActivity : ComponentActivity() {
     private val clearBleFlashTask = Runnable { bleActivityFlash = false }
     private var lastBleDataAtMs: Long = 0L
     private var bleAutoReconnecting = false
+    private val bleReconnectTask = Runnable { reconnectToSavedDevice() }
     private val bleDataWatchdogTask = object : Runnable {
         override fun run() {
             if (!bleConnected || !authenticated || gatt == null) return
             val staleMs = System.currentTimeMillis() - lastBleDataAtMs
-            val rssiOk = (bleSignalRssi ?: Int.MIN_VALUE) >= BLE_RECONNECT_RSSI_MIN_DBM
-            if (!bleAutoReconnecting && staleMs >= BLE_DATA_TIMEOUT_MS && rssiOk) {
+            if (!bleAutoReconnecting && staleMs >= BLE_DATA_TIMEOUT_MS) {
                 triggerBleAutoReconnect()
                 return
             }
@@ -297,7 +331,7 @@ class MainActivity : ComponentActivity() {
                 now - gpsSearchStartedAtMs > GPS_FIX_TIMEOUT_MS
             if (stale || searchingTooLong) {
                 gpsSpeedKmh = 0f
-                viewModel.energyTracker.invalidateLocation()
+                viewModel.energyTracker.invalidateLocation(SystemClock.elapsedRealtime())
                 restartGpsUpdates()
                 return
             }
@@ -312,28 +346,38 @@ class MainActivity : ComponentActivity() {
     private val gpsListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
             lastGpsUpdateAtMs = System.currentTimeMillis()
+            val receivedElapsedMs = SystemClock.elapsedRealtime()
+            val fixElapsedMs = location.elapsedRealtimeNanos / 1_000_000L
+            val fixAgeMs = receivedElapsedMs - fixElapsedMs
             val speed = if (location.hasSpeed()) location.speed * 3.6f else 0f
             gpsSpeedKmh = speed
             val accurateEnough = !location.hasAccuracy() || location.accuracy <= GPS_ENERGY_MAX_ACCURACY_M
             val speedAccurateEnough = !location.hasSpeedAccuracy() ||
                 location.speedAccuracyMetersPerSecond <= GPS_ENERGY_MAX_SPEED_ACCURACY_MPS
-            val usableForEnergy = location.hasSpeed() && accurateEnough && speedAccurateEnough
-            updateGpsSignalState(if (usableForEnergy) GpsSignalState.READY else GpsSignalState.SEARCHING)
+            val freshEnough = fixElapsedMs > 0L && fixAgeMs in -GPS_FIX_FUTURE_TOLERANCE_MS..GPS_ENERGY_MAX_FIX_AGE_MS
+            val plausibleSpeed = speed in 0f..GPS_ENERGY_MAX_SPEED_KMH
+            val bmsFreshEnough = mockChargingSample ||
+                (authenticated && lastRealMetrics != null &&
+                    System.currentTimeMillis() - lastBleDataAtMs <= BLE_DATA_TIMEOUT_MS)
+            val gpsUsable = location.hasSpeed() && accurateEnough && speedAccurateEnough &&
+                freshEnough && plausibleSpeed
+            val usableForEnergy = gpsUsable && bmsFreshEnough
+            updateGpsSignalState(if (gpsUsable) GpsSignalState.READY else GpsSignalState.SEARCHING)
             if (usableForEnergy) {
                 viewModel.energyTracker.onSpeedSample(
                     speedKmh = speed,
-                    elapsedMs = location.elapsedRealtimeNanos / 1_000_000L,
+                    elapsedMs = fixElapsedMs,
                     wallTimeMs = location.time.takeIf { it > 0L } ?: System.currentTimeMillis()
                 )
             } else {
-                viewModel.energyTracker.invalidateLocation()
+                viewModel.energyTracker.invalidateLocation(receivedElapsedMs)
             }
         }
 
         override fun onProviderDisabled(provider: String) {
             updateGpsSignalState(if (gpsEnabled) GpsSignalState.SEARCHING else GpsSignalState.OFF)
             gpsSpeedKmh = if (gpsEnabled) 0f else null
-            viewModel.energyTracker.invalidateLocation()
+            viewModel.energyTracker.invalidateLocation(SystemClock.elapsedRealtime())
         }
 
         override fun onProviderEnabled(provider: String) {
@@ -368,15 +412,33 @@ class MainActivity : ComponentActivity() {
             if (isBluetoothEnabled()) startScan() else setStatus("蓝牙未开启。")
         }
     private val locationPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+            val granted = result[Manifest.permission.ACCESS_FINE_LOCATION] == true
             if (granted) {
                 locationPermissionPrompted = false
-                applyGpsTrackingState()
+                if (pendingBackgroundCollectionEnable) {
+                    pendingBackgroundCollectionEnable = false
+                    finishEnablingBackgroundCollection()
+                } else {
+                    applyGpsTrackingState()
+                }
             } else {
+                pendingBackgroundCollectionEnable = false
+                backgroundCollectionEnabled = false
+                prefs.edit()
+                    .putBoolean(PREF_BACKGROUND_COLLECTION_ENABLED, false)
+                    .putBoolean(PREF_GPS_ENABLED, false)
+                    .apply()
                 gpsEnabled = false
                 gpsSignalState = GpsSignalState.OFF
                 gpsSpeedKmh = null
                 showToast("GPS权限未授权，已关闭测速")
+            }
+        }
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!granted && backgroundCollectionEnabled) {
+                showToast("通知权限未授权；系统仍会运行前台服务，但通知可能只显示在任务管理器中")
             }
         }
 
@@ -392,7 +454,10 @@ class MainActivity : ComponentActivity() {
         themeMode = parseThemeMode(prefs.getString(PREF_THEME_MODE, null))
         applySystemBarAppearance()
         showSpeedCard = prefs.getBoolean(PREF_SHOW_SPEED_CARD, true)
+        showEnergyPanel = prefs.getBoolean(PREF_SHOW_ENERGY_PANEL, true)
+        showMockButton = prefs.getBoolean(PREF_SHOW_MOCK_BUTTON, true)
         splitScreenInfoOnly = prefs.getBoolean(PREF_SPLIT_SCREEN_INFO_ONLY, false)
+        backgroundCollectionEnabled = prefs.getBoolean(PREF_BACKGROUND_COLLECTION_ENABLED, false)
         gpsEnabled = prefs.getBoolean(PREF_GPS_ENABLED, false)
         gaugeEnabled = prefs.getBoolean(PREF_GAUGE_ENABLED, false)
         gaugeSource = parseGaugeSource(prefs.getString(PREF_GAUGE_SOURCE, null))
@@ -400,6 +465,11 @@ class MainActivity : ComponentActivity() {
         gaugePowerMax = parsePositiveFloat(prefs.getFloat(PREF_GAUGE_POWER_MAX, 3000f), 3000f)
         gaugeVoltageMax = parsePositiveFloat(prefs.getFloat(PREF_GAUGE_VOLTAGE_MAX, 86f), 86f)
         autoReconnectAddress = prefs.getString(PREF_LAST_SUCCESS_DEVICE_ADDRESS, null)?.takeIf { it.isNotBlank() }
+        viewModel.energyTracker.restoreTotal(
+            dischargedAh = prefs.getFloat(PREF_TOTAL_DISCHARGED_AH, 0f),
+            recoveredAh = prefs.getFloat(PREF_TOTAL_RECOVERED_AH, 0f),
+            distanceKm = prefs.getFloat(PREF_TOTAL_DISTANCE_KM, 0f)
+        )
 
         setContent {
             JkBmsTheme(useAppFont = useAppFont, themeMode = themeMode) {
@@ -409,7 +479,7 @@ class MainActivity : ComponentActivity() {
                 val splitInfoActive = splitScreenInfoOnly && isSmallWindow
                 Scaffold(
                     floatingActionButton = {
-                        if (!splitInfoActive && selectedTab == BottomTab.INFO) {
+                        if (!splitInfoActive && selectedTab == BottomTab.INFO && showMockButton) {
                             FloatingActionButton(
                                 onClick = {
                                     if (mockChargingSample) {
@@ -424,33 +494,15 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     bottomBar = {
-                        NavigationBar {
-                            NavigationBarItem(
-                                selected = selectedTab == BottomTab.INFO,
-                                onClick = { selectedTab = BottomTab.INFO },
-                                icon = {},
-                                label = { Text(BottomTab.INFO.label) }
-                            )
-                            NavigationBarItem(
-                                selected = selectedTab == BottomTab.BLUETOOTH,
-                                onClick = {
-                                    selectedTab = BottomTab.BLUETOOTH
-                                    if (!scanning) requestScanPermissionsAndStart()
-                                },
-                                icon = {},
-                                label = { Text(BottomTab.BLUETOOTH.label) }
-                            )
-                            NavigationBarItem(
-                                selected = selectedTab == BottomTab.CHART,
-                                onClick = { selectedTab = BottomTab.CHART },
-                                icon = {},
-                                label = { Text(BottomTab.CHART.label) }
-                            )
-                            NavigationBarItem(
-                                selected = selectedTab == BottomTab.SETTINGS,
-                                onClick = { selectedTab = BottomTab.SETTINGS },
-                                icon = {},
-                                label = { Text(BottomTab.SETTINGS.label) }
+                        if (!splitInfoActive) {
+                            FloatingGlassBottomBar(
+                                selectedTab = selectedTab,
+                                onTabSelected = { tab ->
+                                    selectedTab = tab
+                                    if (tab == BottomTab.BLUETOOTH && !scanning) {
+                                        requestScanPermissionsAndStart()
+                                    }
+                                }
                             )
                         }
                     }
@@ -470,11 +522,17 @@ class MainActivity : ComponentActivity() {
                                     bleRssi = bleSignalRssi,
                                     bleActivityFlash = bleActivityFlash,
                                     showSpeedCard = showSpeedCard,
+                                    showEnergyPanel = showEnergyPanel,
                                     gpsSpeedKmh = gpsSpeedKmh,
                                     gpsSignalState = gpsSignalState,
                                     onToggleGps = {
                                         gpsEnabled = !gpsEnabled
                                         prefs.edit().putBoolean(PREF_GPS_ENABLED, gpsEnabled).apply()
+                                        if (!gpsEnabled && backgroundCollectionEnabled) {
+                                            backgroundCollectionEnabled = false
+                                            prefs.edit().putBoolean(PREF_BACKGROUND_COLLECTION_ENABLED, false).apply()
+                                            BackgroundCollectionService.stop(this@MainActivity)
+                                        }
                                         applyGpsTrackingState()
                                         showToast(if (gpsEnabled) "GPS测速已开启" else "GPS测速已关闭")
                                     },
@@ -554,6 +612,20 @@ class MainActivity : ComponentActivity() {
                                     if (it) locationPermissionPrompted = false
                                     applyGpsTrackingState()
                                 },
+                                showEnergyPanel = showEnergyPanel,
+                                onShowEnergyPanelChange = {
+                                    showEnergyPanel = it
+                                    prefs.edit().putBoolean(PREF_SHOW_ENERGY_PANEL, it).apply()
+                                },
+                                onClearTotalEnergy = ::clearTotalEnergy,
+                                showMockButton = showMockButton,
+                                onShowMockButtonChange = {
+                                    showMockButton = it
+                                    prefs.edit().putBoolean(PREF_SHOW_MOCK_BUTTON, it).apply()
+                                    if (!it && mockChargingSample) stopMockDriving()
+                                },
+                                backgroundCollectionEnabled = backgroundCollectionEnabled,
+                                onBackgroundCollectionChange = ::changeBackgroundCollectionEnabled,
                                 splitScreenInfoOnly = splitScreenInfoOnly,
                                 onSplitScreenInfoOnlyChange = {
                                     splitScreenInfoOnly = it
@@ -596,12 +668,22 @@ class MainActivity : ComponentActivity() {
             requestScanPermissionsAndStart()
         }
         applyGpsTrackingState()
+        if (backgroundCollectionEnabled && !hasFineLocationPermission()) {
+            backgroundCollectionEnabled = false
+            prefs.edit()
+                .putBoolean(PREF_BACKGROUND_COLLECTION_ENABLED, false)
+                .putBoolean(PREF_GPS_ENABLED, false)
+                .apply()
+        }
     }
 
     override fun onStart() {
         super.onStart()
+        appInForeground = true
         viewModel.energyTracker.setCollecting(true)
+        if (backgroundCollectionEnabled) startBackgroundCollectionService()
         applyGpsTrackingState()
+        recoverBleSessionOnForeground()
         if (mockChargingSample) {
             uiHandler.removeCallbacks(mockDriveTask)
             uiHandler.post(mockDriveTask)
@@ -614,16 +696,25 @@ class MainActivity : ComponentActivity() {
         if (gpsSessionAgeMs > GPS_RESUME_RESTART_DEBOUNCE_MS) {
             applyGpsTrackingState(forceRestart = true)
         }
+        recoverBleSessionOnForeground()
     }
 
     override fun onStop() {
+        persistTotalEnergy(force = true)
         super.onStop()
-        viewModel.energyTracker.setCollecting(false)
-        stopGpsUpdates()
-        uiHandler.removeCallbacks(mockDriveTask)
+        appInForeground = false
+        if (backgroundCollectionEnabled && startBackgroundCollectionService()) {
+            viewModel.energyTracker.setCollecting(true)
+            applyGpsTrackingState()
+        } else {
+            viewModel.energyTracker.setCollecting(false)
+            stopGpsUpdates()
+            uiHandler.removeCallbacks(mockDriveTask)
+        }
     }
 
     override fun onDestroy() {
+        persistTotalEnergy(force = true)
         super.onDestroy()
         stopScan()
         disconnectGatt()
@@ -632,6 +723,7 @@ class MainActivity : ComponentActivity() {
         uiHandler.removeCallbacks(pollRssiTask)
         uiHandler.removeCallbacks(mockDriveTask)
         uiHandler.removeCallbacks(bleDataWatchdogTask)
+        uiHandler.removeCallbacks(bleReconnectTask)
     }
 
     private fun requiredPermissions(): Array<String> {
@@ -694,6 +786,7 @@ class MainActivity : ComponentActivity() {
         setStatus("扫描已停止。")
     }
 
+    @SuppressLint("MissingPermission")
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device ?: return
@@ -757,12 +850,65 @@ class MainActivity : ComponentActivity() {
 
     private fun startBleWatchdog() {
         uiHandler.removeCallbacks(bleDataWatchdogTask)
-        lastBleDataAtMs = System.currentTimeMillis()
+        if (lastBleDataAtMs == 0L) lastBleDataAtMs = System.currentTimeMillis()
         uiHandler.postDelayed(bleDataWatchdogTask, BLE_WATCHDOG_INTERVAL_MS)
     }
 
     private fun stopBleWatchdog() {
         uiHandler.removeCallbacks(bleDataWatchdogTask)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun recoverBleSessionOnForeground() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastBleForegroundRecoveryAtMs < BLE_FOREGROUND_RECOVERY_DEBOUNCE_MS) return
+        lastBleForegroundRecoveryAtMs = now
+        if (!hasAllRequiredPermissions() || !isBluetoothEnabled() || mockChargingSample) return
+
+        val activeGatt = gatt
+        when {
+            activeGatt != null && bleConnected && authenticated -> {
+                uiHandler.removeCallbacks(pollTask)
+                uiHandler.post(pollTask)
+                uiHandler.removeCallbacks(pollRssiTask)
+                uiHandler.post(pollRssiTask)
+                startBleWatchdog()
+                if (System.currentTimeMillis() - lastBleDataAtMs >= BLE_DATA_TIMEOUT_MS) {
+                    triggerBleAutoReconnect()
+                }
+            }
+
+            activeGatt != null && bleConnected -> {
+                setStatus("正在恢复蓝牙服务与通知...")
+                activeGatt.discoverServices()
+            }
+
+            else -> reconnectToSavedDevice()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun reconnectToSavedDevice() {
+        if ((!appInForeground && !backgroundCollectionEnabled) || autoConnecting || mockChargingSample) return
+        if (!hasAllRequiredPermissions() || !isBluetoothEnabled()) return
+        val address = connectedAddress ?: autoReconnectAddress ?: return
+        if (!BluetoothAdapter.checkBluetoothAddress(address)) return
+        val device = try {
+            bluetoothAdapter.getRemoteDevice(address)
+        } catch (_: IllegalArgumentException) {
+            return
+        }
+        autoConnecting = true
+        selectedDevice = device
+        selectedAddress = address
+        setStatus("正在恢复上次蓝牙连接...")
+        connectToDevice(device)
+    }
+
+    private fun scheduleBleReconnect() {
+        if (!appInForeground && !backgroundCollectionEnabled) return
+        uiHandler.removeCallbacks(bleReconnectTask)
+        uiHandler.postDelayed(bleReconnectTask, BLE_RECONNECT_DELAY_MS)
     }
 
     @SuppressLint("MissingPermission")
@@ -777,7 +923,7 @@ class MainActivity : ComponentActivity() {
         }
         bleAutoReconnecting = true
         autoConnecting = true
-        setStatus("3秒未收到数据且信号正常，自动重连中...")
+        setStatus("3秒未收到蓝牙数据，自动重连中...")
         connectToDevice(device)
     }
 
@@ -791,6 +937,7 @@ class MainActivity : ComponentActivity() {
         if (mockChargingSample) {
             stopMockDriving()
         }
+        if (scanning) stopScan()
         disconnectGatt()
         authenticated = false
         frameBuffer.clear()
@@ -804,15 +951,23 @@ class MainActivity : ComponentActivity() {
         connectedAddress = device.address
         lastBleDataAtMs = System.currentTimeMillis()
         setStatus("正在连接 ${formatDevice(device)} ...")
-        gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        gatt = try {
             device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-        } else {
-            device.connectGatt(this, false, gattCallback)
+        } catch (_: RuntimeException) {
+            null
+        }
+        if (gatt == null) {
+            autoConnecting = false
+            bleAutoReconnecting = false
+            connectedAddress = null
+            setStatus("蓝牙连接启动失败，稍后重试。")
+            scheduleBleReconnect()
         }
     }
 
     @SuppressLint("MissingPermission")
     private fun disconnectGatt() {
+        uiHandler.removeCallbacks(bleReconnectTask)
         uiHandler.removeCallbacks(pollTask)
         uiHandler.removeCallbacks(pollRssiTask)
         uiHandler.removeCallbacks(clearBleFlashTask)
@@ -831,93 +986,133 @@ class MainActivity : ComponentActivity() {
         bleActivityFlash = false
         connectedAddress = null
         lastBleDataAtMs = 0L
+        viewModel.energyTracker.invalidateBmsContinuity()
     }
 
+    @SuppressLint("MissingPermission")
+    private fun withActiveGatt(callbackGatt: BluetoothGatt, action: () -> Unit) {
+        uiHandler.post {
+            if (callbackGatt !== this@MainActivity.gatt) {
+                callbackGatt.close()
+                return@post
+            }
+            action()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            if (newState == BluetoothGatt.STATE_CONNECTED) {
-                bleAutoReconnecting = false
-                bleConnected = true
-                connectedAddress = gatt.device.address
-                uiHandler.removeCallbacks(pollRssiTask)
-                uiHandler.post(pollRssiTask)
-                setStatus("已连接，正在发现服务...")
-                gatt.discoverServices()
-            } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
-                setStatus("已断开连接。")
-                bleAutoReconnecting = false
-                authenticated = false
-                resetCellRequestState()
-                autoConnecting = false
-                uiHandler.removeCallbacks(pollTask)
-                uiHandler.removeCallbacks(pollRssiTask)
-                uiHandler.removeCallbacks(clearBleFlashTask)
-                stopBleWatchdog()
-                lastRealMetrics = null
-                if (!mockChargingSample) latestMetrics = null
-                applyGpsTrackingState()
-                bleConnected = false
-                bleSignalRssi = null
-                bleActivityFlash = false
-                connectedAddress = null
+        override fun onConnectionStateChange(callbackGatt: BluetoothGatt, status: Int, newState: Int) {
+            withActiveGatt(callbackGatt) {
+                if (newState == BluetoothGatt.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                    bleAutoReconnecting = false
+                    bleConnected = true
+                    connectedAddress = callbackGatt.device.address
+                    uiHandler.removeCallbacks(pollRssiTask)
+                    uiHandler.post(pollRssiTask)
+                    setStatus("已连接，正在发现服务...")
+                    callbackGatt.discoverServices()
+                } else if (newState == BluetoothGatt.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
+                    val reconnectAddress = callbackGatt.device.address
+                    setStatus("蓝牙已断开，等待自动恢复。")
+                    bleAutoReconnecting = false
+                    authenticated = false
+                    resetCellRequestState()
+                    autoConnecting = false
+                    uiHandler.removeCallbacks(pollTask)
+                    uiHandler.removeCallbacks(pollRssiTask)
+                    uiHandler.removeCallbacks(clearBleFlashTask)
+                    stopBleWatchdog()
+                    callbackGatt.close()
+                    this@MainActivity.gatt = null
+                    writeCharacteristic = null
+                    notifyCharacteristic = null
+                    frameBuffer.clear()
+                    lastRealMetrics = null
+                    if (!mockChargingSample) latestMetrics = null
+                    viewModel.energyTracker.invalidateBmsContinuity()
+                    applyGpsTrackingState()
+                    bleConnected = false
+                    bleSignalRssi = null
+                    bleActivityFlash = false
+                    connectedAddress = null
+                    if (autoReconnectAddress == null) autoReconnectAddress = reconnectAddress
+                    scheduleBleReconnect()
+                }
             }
         }
 
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                setStatus("服务发现失败: $status")
-                return
-            }
-            val service = gatt.services.firstOrNull { it.uuid == JK_SERVICE_UUID }
-            if (service == null) {
-                setStatus("未找到 JK 服务 FFE0。")
-                return
-            }
-            val chars = service.characteristics.filter { it.uuid == JK_CHARACTERISTIC_UUID }
-            if (chars.isEmpty()) {
-                setStatus("未找到 JK 特征 FFE1。")
-                return
-            }
-            writeCharacteristic = chars.firstOrNull {
-                (it.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0 ||
-                    (it.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
-            }
-            notifyCharacteristic = chars.firstOrNull {
-                (it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 ||
-                    (it.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
-            } ?: writeCharacteristic
-            if (writeCharacteristic == null || notifyCharacteristic == null) {
-                setStatus("FFE1 特征不支持读写通知组合。")
-                return
-            }
-            enableNotifications(gatt, notifyCharacteristic!!)
-        }
-
-        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                setStatus("通知已开启，正在读取设备信息...")
-                sendCommand(COMMAND_DEVICE_INFO)
-            } else {
-                setStatus("通知开启失败: $status")
-                autoConnecting = false
+        override fun onServicesDiscovered(callbackGatt: BluetoothGatt, status: Int) {
+            withActiveGatt(callbackGatt) {
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    setStatus("服务发现失败: $status，准备重连")
+                    triggerBleAutoReconnect()
+                    return@withActiveGatt
+                }
+                val service = callbackGatt.services.firstOrNull { it.uuid == JK_SERVICE_UUID }
+                if (service == null) {
+                    setStatus("未找到 JK 服务 FFE0。")
+                    return@withActiveGatt
+                }
+                val chars = service.characteristics.filter { it.uuid == JK_CHARACTERISTIC_UUID }
+                if (chars.isEmpty()) {
+                    setStatus("未找到 JK 特征 FFE1。")
+                    return@withActiveGatt
+                }
+                writeCharacteristic = chars.firstOrNull {
+                    (it.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0 ||
+                        (it.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
+                }
+                notifyCharacteristic = chars.firstOrNull {
+                    (it.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 ||
+                        (it.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+                } ?: writeCharacteristic
+                if (writeCharacteristic == null || notifyCharacteristic == null) {
+                    setStatus("FFE1 特征不支持读写通知组合。")
+                    return@withActiveGatt
+                }
+                enableNotifications(callbackGatt, notifyCharacteristic!!)
             }
         }
 
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            onNotifyBytes(characteristic.value ?: return)
+        override fun onDescriptorWrite(
+            callbackGatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            withActiveGatt(callbackGatt) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    setStatus("通知已开启，正在读取设备信息...")
+                    sendCommand(COMMAND_DEVICE_INFO)
+                } else {
+                    setStatus("通知开启失败: $status，准备重连")
+                    autoConnecting = false
+                    triggerBleAutoReconnect()
+                }
+            }
+        }
+
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(
+            callbackGatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            val value = characteristic.value?.copyOf() ?: return
+            withActiveGatt(callbackGatt) { onNotifyBytes(value) }
         }
 
         override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
+            callbackGatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            onNotifyBytes(value)
+            val stableValue = value.copyOf()
+            withActiveGatt(callbackGatt) { onNotifyBytes(stableValue) }
         }
 
-        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                bleSignalRssi = rssi
+        override fun onReadRemoteRssi(callbackGatt: BluetoothGatt, rssi: Int, status: Int) {
+            withActiveGatt(callbackGatt) {
+                if (status == BluetoothGatt.GATT_SUCCESS) bleSignalRssi = rssi
             }
         }
     }
@@ -1197,6 +1392,7 @@ class MainActivity : ComponentActivity() {
         return ByteBuffer.wrap(data, offset, 2).order(ByteOrder.LITTLE_ENDIAN).short
     }
 
+    @SuppressLint("MissingPermission")
     private fun formatDevice(device: BluetoothDevice): String {
         val name = device.name ?: "Unknown"
         return "$name (${device.address})"
@@ -1250,6 +1446,7 @@ class MainActivity : ComponentActivity() {
             elapsedMs = nowElapsed,
             wallTimeMs = nowWall
         )
+        persistTotalEnergy()
         if (chartRecording) {
             appendTrendSample(
                 TrendSample(
@@ -1264,7 +1461,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startMockDriving() {
+        persistTotalEnergy(force = true)
         mockChargingSample = true
+        stopGpsUpdates()
+        viewModel.energyTracker.setAccumulateTotal(false)
         viewModel.energyTracker.resetSession()
         mockDriveTick = 0
         lastMockPhase = null
@@ -1288,10 +1488,11 @@ class MainActivity : ComponentActivity() {
         lastMockPhase = null
         uiHandler.removeCallbacks(mockDriveTask)
         viewModel.energyTracker.resetSession()
+        viewModel.energyTracker.setAccumulateTotal(true)
         lastRealMetrics?.let(::acceptMetrics)
-        gpsSignalState = GpsSignalState.OFF
         gpsSpeedKmh = null
         viewModel.energyTracker.invalidateLocation()
+        applyGpsTrackingState(forceRestart = true)
         showToast("MOCK行车已停止")
         setStatus("已停止 MOCK 行车数据。")
     }
@@ -1425,9 +1626,87 @@ class MainActivity : ComponentActivity() {
         insetsController.isAppearanceLightNavigationBars = !darkMode
     }
 
+    private fun clearTotalEnergy() {
+        viewModel.energyTracker.clearTotal()
+        persistTotalEnergy(force = true)
+        showToast("TOTAL 总计已清除，TRIP A 保持不变")
+    }
+
+    private fun persistTotalEnergy(force: Boolean = false) {
+        if (mockChargingSample && !force) return
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastTotalPersistAtMs < TOTAL_PERSIST_INTERVAL_MS) return
+        val state = viewModel.energyState
+        prefs.edit()
+            .putFloat(PREF_TOTAL_DISCHARGED_AH, state.totalDischargedAh)
+            .putFloat(PREF_TOTAL_RECOVERED_AH, state.totalRecoveredAh)
+            .putFloat(PREF_TOTAL_DISTANCE_KM, state.totalDistanceKm)
+            .apply()
+        lastTotalPersistAtMs = now
+    }
+
+    private fun changeBackgroundCollectionEnabled(enabled: Boolean) {
+        if (!enabled) {
+            pendingBackgroundCollectionEnable = false
+            backgroundCollectionEnabled = false
+            prefs.edit().putBoolean(PREF_BACKGROUND_COLLECTION_ENABLED, false).apply()
+            BackgroundCollectionService.stop(this)
+            showToast("后台能耗采集已关闭")
+            return
+        }
+        if (!hasFineLocationPermission()) {
+            pendingBackgroundCollectionEnable = true
+            locationPermissionPrompted = true
+            locationPermissionLauncher.launch(locationPermissions())
+            return
+        }
+        finishEnablingBackgroundCollection()
+    }
+
+    private fun finishEnablingBackgroundCollection() {
+        backgroundCollectionEnabled = true
+        gpsEnabled = true
+        prefs.edit()
+            .putBoolean(PREF_BACKGROUND_COLLECTION_ENABLED, true)
+            .putBoolean(PREF_GPS_ENABLED, true)
+            .apply()
+        viewModel.energyTracker.setCollecting(true)
+        if (!startBackgroundCollectionService()) return
+        applyGpsTrackingState(forceRestart = true)
+        requestNotificationPermissionIfNeeded()
+        recoverBleSessionOnForeground()
+        showToast("后台能耗采集已开启")
+    }
+
+    private fun startBackgroundCollectionService(): Boolean {
+        return try {
+            BackgroundCollectionService.start(this)
+            true
+        } catch (_: RuntimeException) {
+            backgroundCollectionEnabled = false
+            prefs.edit().putBoolean(PREF_BACKGROUND_COLLECTION_ENABLED, false).apply()
+            showToast("无法启动后台采集，请检查定位与后台运行权限")
+            false
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     private fun hasFineLocationPermission(): Boolean {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
     }
+
+    private fun locationPermissions(): Array<String> = arrayOf(
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+        Manifest.permission.ACCESS_FINE_LOCATION
+    )
 
     private fun applyGpsTrackingState(forceRestart: Boolean = false) {
         if (!gpsEnabled) {
@@ -1453,7 +1732,7 @@ class MainActivity : ComponentActivity() {
         if (!hasFineLocationPermission()) {
             if (!locationPermissionPrompted) {
                 locationPermissionPrompted = true
-                locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                locationPermissionLauncher.launch(locationPermissions())
             } else {
                 updateGpsSignalState(GpsSignalState.OFF)
                 gpsSpeedKmh = null
@@ -1509,12 +1788,18 @@ class MainActivity : ComponentActivity() {
         private const val PREF_USE_APP_FONT = "pref_use_app_font"
         private const val PREF_THEME_MODE = "pref_theme_mode"
         private const val PREF_SHOW_SPEED_CARD = "pref_show_speed_card"
+        private const val PREF_SHOW_ENERGY_PANEL = "pref_show_energy_panel"
+        private const val PREF_SHOW_MOCK_BUTTON = "pref_show_mock_button"
         private const val PREF_SPLIT_SCREEN_INFO_ONLY = "pref_split_screen_info_only"
+        private const val PREF_BACKGROUND_COLLECTION_ENABLED = "pref_background_collection_enabled"
         private const val PREF_GAUGE_ENABLED = "pref_gauge_enabled"
         private const val PREF_GAUGE_SOURCE = "pref_gauge_source"
         private const val PREF_GAUGE_CURRENT_MAX = "pref_gauge_current_max"
         private const val PREF_GAUGE_POWER_MAX = "pref_gauge_power_max"
         private const val PREF_GAUGE_VOLTAGE_MAX = "pref_gauge_voltage_max"
+        private const val PREF_TOTAL_DISCHARGED_AH = "pref_total_discharged_ah"
+        private const val PREF_TOTAL_RECOVERED_AH = "pref_total_recovered_ah"
+        private const val PREF_TOTAL_DISTANCE_KM = "pref_total_distance_km"
 
         private const val MIN_FRAME_SIZE = 300
         private const val MAX_FRAME_SIZE = 420
@@ -1528,7 +1813,8 @@ class MainActivity : ComponentActivity() {
         private const val PREF_GPS_ENABLED = "pref_gps_enabled"
         private const val BLE_DATA_TIMEOUT_MS = 3_000L
         private const val BLE_WATCHDOG_INTERVAL_MS = 1_000L
-        private const val BLE_RECONNECT_RSSI_MIN_DBM = -90
+        private const val BLE_RECONNECT_DELAY_MS = 1_500L
+        private const val BLE_FOREGROUND_RECOVERY_DEBOUNCE_MS = 500L
         private const val CELL_POLL_INTERVAL_MS = 500L
         private const val CELL_REQUEST_TIMEOUT_MS = 1_500L
         private const val GPS_FIX_TIMEOUT_MS = 5_000L
@@ -1537,12 +1823,85 @@ class MainActivity : ComponentActivity() {
         private const val GPS_RESUME_RESTART_DEBOUNCE_MS = 1_000L
         private const val GPS_ENERGY_MAX_ACCURACY_M = 60f
         private const val GPS_ENERGY_MAX_SPEED_ACCURACY_MPS = 5f
+        private const val GPS_ENERGY_MAX_FIX_AGE_MS = 2_500L
+        private const val GPS_FIX_FUTURE_TOLERANCE_MS = 500L
+        private const val GPS_ENERGY_MAX_SPEED_KMH = 200f
         private const val MAX_CHART_SAMPLES = 7_200
+        private const val TOTAL_PERSIST_INTERVAL_MS = 5_000L
 
         private val JK_SERVICE_UUID: UUID = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
         private val JK_CHARACTERISTIC_UUID: UUID = UUID.fromString("0000ffe1-0000-1000-8000-00805f9b34fb")
         private val CLIENT_CONFIG_DESCRIPTOR_UUID: UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
+    }
+}
+
+@Composable
+private fun FloatingGlassBottomBar(
+    selectedTab: BottomTab,
+    onTabSelected: (BottomTab) -> Unit
+) {
+    val shape = RoundedCornerShape(32.dp)
+    val selectedGreen = Color(0xFF41CD52)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 18.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = shape,
+            color = Color.Transparent,
+            border = BorderStroke(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f)
+            ),
+            shadowElevation = 14.dp
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(58.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f),
+                                MaterialTheme.colorScheme.surface.copy(alpha = 0.74f)
+                            )
+                        )
+                    )
+                    .padding(5.dp)
+            ) {
+                BottomTab.entries.forEach { tab ->
+                    val selected = tab == selectedTab
+                    val background = animateColorAsState(
+                        targetValue = if (selected) selectedGreen.copy(alpha = 0.18f) else Color.Transparent,
+                        label = "bottom-tab-background"
+                    ).value
+                    val textColor = animateColorAsState(
+                        targetValue = if (selected) selectedGreen else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                        label = "bottom-tab-text"
+                    ).value
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .background(background, RoundedCornerShape(25.dp))
+                            .clickable { onTabSelected(tab) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = tab.label,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            color = textColor
+                        )
+                    }
+                }
+            }
+        }
     }
 }

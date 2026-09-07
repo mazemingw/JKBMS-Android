@@ -64,6 +64,11 @@ data class EnergyUiState(
     val sessionNetAh: Float = 0f,
     val sessionDistanceKm: Float = 0f,
     val sessionKmPerAh: Float? = null,
+    val totalNetAh: Float = 0f,
+    val totalDischargedAh: Float = 0f,
+    val totalRecoveredAh: Float = 0f,
+    val totalDistanceKm: Float = 0f,
+    val totalKmPerAh: Float? = null,
     val estimatedRangeKm: Float? = null,
     val remainingAh: Float? = null,
     val trend: List<EnergyTrendPoint> = emptyList()

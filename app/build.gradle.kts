@@ -14,8 +14,8 @@ android {
         applicationId = "com.yiming.jkbms"
         minSdk = 27
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.2.5"
+        versionCode = 17
+        versionName = "1.2.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

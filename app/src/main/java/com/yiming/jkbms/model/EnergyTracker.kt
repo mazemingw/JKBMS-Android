@@ -37,6 +37,8 @@ class EnergyTracker(
     private var lastCurrentAtMs: Long? = null
     private var lastSpeedMps: Double? = null
     private var lastSpeedAtMs: Long? = null
+    private var lastValidLocationAtMs: Long? = null
+    private var consecutiveLocationFixes = 0
 
     private var remainingAh: Double? = null
     private var tripDischargedAh = 0.0
@@ -45,6 +47,11 @@ class EnergyTracker(
     private var sessionDischargedAh = 0.0
     private var sessionRecoveredAh = 0.0
     private var sessionDistanceKm = 0.0
+    private var totalDischargedAh = 0.0
+    private var totalRecoveredAh = 0.0
+    private var totalDistanceKm = 0.0
+    private var accumulateTotal = true
+    private var totalRestored = false
 
     private val pendingStart = PendingTotals()
     private val pendingPause = PendingTotals()
@@ -52,6 +59,7 @@ class EnergyTracker(
     private val trend = ArrayDeque<EnergyTrendPoint>()
     private var lastTrendAtMs = 0L
 
+    @Synchronized
     fun setCollecting(enabled: Boolean) {
         if (collecting == enabled) return
         collecting = enabled
@@ -60,6 +68,8 @@ class EnergyTracker(
         lastCurrentAtMs = null
         lastSpeedMps = null
         lastSpeedAtMs = null
+        lastValidLocationAtMs = null
+        consecutiveLocationFixes = 0
         if (!enabled) {
             startCandidateAtMs = null
             if (stationarySinceMs != null && motionState == TripMotionState.MOVING) {
@@ -70,6 +80,7 @@ class EnergyTracker(
         publish()
     }
 
+    @Synchronized
     fun onBmsSample(currentA: Float, capacityRemainingAh: Float?, elapsedMs: Long, wallTimeMs: Long) {
         if (capacityRemainingAh != null && capacityRemainingAh.isFinite() && capacityRemainingAh >= 0f) {
             remainingAh = capacityRemainingAh.toDouble()
@@ -98,13 +109,30 @@ class EnergyTracker(
         publish()
     }
 
+    @Synchronized
     fun onSpeedSample(speedKmh: Float, elapsedMs: Long, wallTimeMs: Long) {
         if (!collecting || !speedKmh.isFinite()) return
         val speedMps = max(speedKmh.toDouble(), 0.0) / 3.6
 
+        val previousLocationAt = lastValidLocationAtMs
+        val continuousFix = previousLocationAt != null &&
+            elapsedMs - previousLocationAt in 1..MAX_LOCATION_GAP_MS
+        if (!continuousFix) {
+            // A recovered/cached GPS fix is only a new baseline. Requiring one more
+            // fresh fix prevents a long signal outage from becoming one large sample.
+            lastSpeedMps = null
+            lastSpeedAtMs = null
+            consecutiveLocationFixes = 0
+            rolling.clear()
+            updateEnergyIntegrationGate(false)
+        }
+        lastValidLocationAtMs = elapsedMs
+        consecutiveLocationFixes++
+
         updateMotionState(speedKmh.toDouble(), elapsedMs)
         updateEnergyIntegrationGate(
-            speedKmh >= STOP_SPEED_KMH &&
+            consecutiveLocationFixes >= LOCATION_FIXES_TO_RESUME &&
+                speedKmh >= STOP_SPEED_KMH &&
                 stationarySinceMs == null &&
                 (motionState == TripMotionState.MOVING || startCandidateAtMs != null)
         )
@@ -128,18 +156,51 @@ class EnergyTracker(
         publish()
     }
 
-    fun invalidateLocation() {
+    @Synchronized
+    fun invalidateLocation(elapsedMs: Long? = null) {
         lastSpeedMps = null
         lastSpeedAtMs = null
+        lastValidLocationAtMs = null
+        consecutiveLocationFixes = 0
+        rolling.clear()
         updateEnergyIntegrationGate(false)
+        if (collecting && elapsedMs != null) {
+            updateMotionState(0.0, elapsedMs)
+        }
         publish()
     }
 
+    @Synchronized
     fun invalidateBmsContinuity() {
         lastCurrentA = null
         lastCurrentAtMs = null
     }
 
+    @Synchronized
+    fun restoreTotal(dischargedAh: Float, recoveredAh: Float, distanceKm: Float) {
+        if (totalRestored) return
+        totalDischargedAh = dischargedAh.validTotalValue()
+        totalRecoveredAh = recoveredAh.validTotalValue()
+        totalDistanceKm = distanceKm.validTotalValue()
+        totalRestored = true
+        publish()
+    }
+
+    @Synchronized
+    fun setAccumulateTotal(enabled: Boolean) {
+        accumulateTotal = enabled
+    }
+
+    @Synchronized
+    fun clearTotal() {
+        totalDischargedAh = 0.0
+        totalRecoveredAh = 0.0
+        totalDistanceKm = 0.0
+        totalRestored = true
+        publish()
+    }
+
+    @Synchronized
     fun resetSession() {
         motionState = TripMotionState.IDLE
         energyIntegrationEnabled = false
@@ -149,6 +210,8 @@ class EnergyTracker(
         lastCurrentAtMs = null
         lastSpeedMps = null
         lastSpeedAtMs = null
+        lastValidLocationAtMs = null
+        consecutiveLocationFixes = 0
         remainingAh = null
         tripDischargedAh = 0.0
         tripRecoveredAh = 0.0
@@ -213,6 +276,11 @@ class EnergyTracker(
         tripDischargedAh = pendingStart.dischargedAh
         tripRecoveredAh = pendingStart.recoveredAh
         tripDistanceKm = pendingStart.distanceKm
+        if (accumulateTotal) {
+            totalDischargedAh += pendingStart.dischargedAh
+            totalRecoveredAh += pendingStart.recoveredAh
+            totalDistanceKm += pendingStart.distanceKm
+        }
         pendingStart.clear()
         pendingPause.clear()
         rolling.clear()
@@ -235,6 +303,11 @@ class EnergyTracker(
         tripDischargedAh += pendingPause.dischargedAh
         tripRecoveredAh += pendingPause.recoveredAh
         tripDistanceKm += pendingPause.distanceKm
+        if (accumulateTotal) {
+            totalDischargedAh += pendingPause.dischargedAh
+            totalRecoveredAh += pendingPause.recoveredAh
+            totalDistanceKm += pendingPause.distanceKm
+        }
         pendingPause.clear()
     }
 
@@ -259,6 +332,10 @@ class EnergyTracker(
             motionState == TripMotionState.MOVING -> {
                 tripDischargedAh += dischargedAh
                 tripRecoveredAh += recoveredAh
+                if (accumulateTotal) {
+                    totalDischargedAh += dischargedAh
+                    totalRecoveredAh += recoveredAh
+                }
             }
         }
     }
@@ -271,7 +348,10 @@ class EnergyTracker(
         when {
             motionState == TripMotionState.IDLE && startCandidateAtMs != null -> pendingStart.distanceKm += distanceKm
             stationarySinceMs != null -> pendingPause.distanceKm += distanceKm
-            motionState == TripMotionState.MOVING -> tripDistanceKm += distanceKm
+            motionState == TripMotionState.MOVING -> {
+                tripDistanceKm += distanceKm
+                if (accumulateTotal) totalDistanceKm += distanceKm
+            }
         }
     }
 
@@ -310,9 +390,11 @@ class EnergyTracker(
         val visibleDistance = tripDistanceKm + if (stationarySinceMs != null) pendingPause.distanceKm else 0.0
         val tripNet = visibleDischarged - visibleRecovered
         val sessionNet = sessionDischargedAh - sessionRecoveredAh
+        val totalNet = totalDischargedAh - totalRecoveredAh
         val tripEfficiency = efficiency(visibleDistance, tripNet, MIN_TRIP_DISTANCE_KM, MIN_NET_AH)
         val sessionEfficiency = efficiency(sessionDistanceKm, sessionNet, MIN_SESSION_DISTANCE_KM, MIN_NET_AH)
-        val rangeEfficiency = tripEfficiency ?: sessionEfficiency
+        val totalEfficiency = efficiency(totalDistanceKm, totalNet, MIN_TOTAL_DISTANCE_KM, MIN_NET_AH)
+        val rangeEfficiency = tripEfficiency ?: totalEfficiency ?: sessionEfficiency
         val range = if (remainingAh != null && rangeEfficiency != null) remainingAh!! * rangeEfficiency else null
 
         onStateChanged(
@@ -326,6 +408,11 @@ class EnergyTracker(
                 sessionNetAh = sessionNet.toFloat(),
                 sessionDistanceKm = sessionDistanceKm.toFloat(),
                 sessionKmPerAh = sessionEfficiency?.toFloat(),
+                totalNetAh = totalNet.toFloat(),
+                totalDischargedAh = totalDischargedAh.toFloat(),
+                totalRecoveredAh = totalRecoveredAh.toFloat(),
+                totalDistanceKm = totalDistanceKm.toFloat(),
+                totalKmPerAh = totalEfficiency?.toFloat(),
                 estimatedRangeKm = range?.coerceAtLeast(0.0)?.toFloat(),
                 remainingAh = remainingAh?.toFloat(),
                 trend = trend.toList()
@@ -338,6 +425,9 @@ class EnergyTracker(
         return (distanceKm / netAh).takeIf { it.isFinite() && it in 0.05..100.0 }
     }
 
+    private fun Float.validTotalValue(): Double =
+        takeIf { it.isFinite() && it >= 0f }?.toDouble() ?: 0.0
+
     private companion object {
         const val START_SPEED_KMH = 3.0
         const val STOP_SPEED_KMH = 1.0
@@ -347,6 +437,7 @@ class EnergyTracker(
         const val TRIP_END_MS = 180_000L
         const val MAX_INTEGRATION_GAP_MS = 10_000L
         const val MAX_LOCATION_GAP_MS = 5_000L
+        const val LOCATION_FIXES_TO_RESUME = 2
         const val ROLLING_WINDOW_MS = 60_000L
         const val ROLLING_BUCKET_MS = 1_000L
         const val TREND_INTERVAL_MS = 500L
@@ -354,6 +445,7 @@ class EnergyTracker(
         const val MAX_TREND_POINTS = 140
         const val MIN_TRIP_DISTANCE_KM = 0.1
         const val MIN_SESSION_DISTANCE_KM = 0.5
+        const val MIN_TOTAL_DISTANCE_KM = 0.1
         const val ROLLING_MIN_DISTANCE_KM = 0.03
         const val ROLLING_MIN_NET_AH = 0.003
         const val MIN_NET_AH = 0.01

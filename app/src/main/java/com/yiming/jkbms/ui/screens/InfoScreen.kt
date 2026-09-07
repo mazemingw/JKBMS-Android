@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DeveloperBoard
@@ -95,6 +96,7 @@ fun InfoPage(
     bleRssi: Int? = null,
     bleActivityFlash: Boolean = false,
     showSpeedCard: Boolean = true,
+    showEnergyPanel: Boolean = true,
     gpsSpeedKmh: Float? = null,
     gpsSignalState: GpsSignalState = GpsSignalState.OFF,
     onToggleGps: () -> Unit = {},
@@ -183,7 +185,7 @@ fun InfoPage(
             }
         }
 
-        if (!compactTopMetricsOnly) {
+        if (!compactTopMetricsOnly && showEnergyPanel) {
             EnergyOverviewCard(
                 energyState = energyState,
                 isDark = isDark,
@@ -377,6 +379,12 @@ private fun BigMetricCard(
     }
 }
 
+private enum class EnergyCardMode(val label: String) {
+    CHART("曲线"),
+    TRIP_A("TRIP A"),
+    TOTAL("TOTAL")
+}
+
 @Composable
 private fun EnergyOverviewCard(
     energyState: EnergyUiState,
@@ -384,7 +392,7 @@ private fun EnergyOverviewCard(
     hasBmsData: Boolean,
     gpsSignalState: GpsSignalState
 ) {
-    var showStats by remember { mutableStateOf(false) }
+    var mode by remember { mutableStateOf(EnergyCardMode.CHART) }
     val green = Color(0xFF41CD52)
     val chartPoints = remember(energyState.trend) {
         energyState.trend.map { EChartPoint(it.timestampMs, it.kmPerAh) }
@@ -400,6 +408,17 @@ private fun EnergyOverviewCard(
         gpsSignalState == GpsSignalState.OFF -> "请开启GPS"
         gpsSignalState == GpsSignalState.SEARCHING -> "等待GPS定位"
         else -> null
+    }
+    val headlineDistance = when (mode) {
+        EnergyCardMode.TOTAL -> energyState.totalDistanceKm
+        EnergyCardMode.CHART, EnergyCardMode.TRIP_A -> energyState.tripDistanceKm
+    }
+    val nextMode = {
+        mode = when (mode) {
+            EnergyCardMode.CHART -> EnergyCardMode.TRIP_A
+            EnergyCardMode.TRIP_A -> EnergyCardMode.TOTAL
+            EnergyCardMode.TOTAL -> EnergyCardMode.CHART
+        }
     }
 
     Card(
@@ -418,82 +437,110 @@ private fun EnergyOverviewCard(
                 ) {
                     Text("能效", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        formatCompactDistance(energyState.tripDistanceKm),
+                        formatCompactDistance(headlineDistance),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f)
                     )
                 }
                 Text(
-                    if (showStats) "查看曲线" else "查看数据",
-                    modifier = Modifier.clickable { showStats = !showStats }.padding(8.dp),
-                    style = MaterialTheme.typography.labelLarge,
+                    mode.label,
+                    modifier = Modifier
+                        .background(green.copy(alpha = if (isDark) 0.18f else 0.12f), RoundedCornerShape(14.dp))
+                        .clickable(onClick = nextMode)
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
                     color = green
                 )
             }
 
-            if (showStats) {
-                    Column(
-                        modifier = Modifier.fillMaxSize().clickable { showStats = false },
-                        verticalArrangement = Arrangement.SpaceEvenly
+            when (mode) {
+                EnergyCardMode.TRIP_A -> EnergyStatsPanel(
+                    distanceLabel = "本次里程",
+                    distance = energyState.tripDistanceKm,
+                    energyLabel = "本次耗电",
+                    netAh = energyState.tripNetAh,
+                    efficiencyLabel = "单次能效",
+                    efficiency = energyState.tripKmPerAh,
+                    footer = "回收 ${formatAmpHours(energyState.tripRecoveredAh)}  ·  预计里程 ${formatRange(energyState.estimatedRangeKm)}",
+                    green = green,
+                    isDark = isDark,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                EnergyCardMode.TOTAL -> EnergyStatsPanel(
+                    distanceLabel = "总里程",
+                    distance = energyState.totalDistanceKm,
+                    energyLabel = "总耗电",
+                    netAh = energyState.totalNetAh,
+                    efficiencyLabel = "平均能效",
+                    efficiency = energyState.totalKmPerAh,
+                    footer = "累计回收 ${formatAmpHours(energyState.totalRecoveredAh)}  ·  预计里程 ${formatRange(energyState.estimatedRangeKm)}",
+                    green = green,
+                    isDark = isDark,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                EnergyCardMode.CHART -> if (chartPoints.size >= 2) {
+                    EChartsLine(
+                        points = chartPoints,
+                        name = "近60秒能效",
+                        unit = "km/Ah",
+                        color = green,
+                        modifier = Modifier.fillMaxSize(),
+                        decimals = 2,
+                        showArea = true,
+                        windowMs = 60_000L,
+                        windowStepMs = 500L,
+                        showExtrema = true,
+                        pieSlices = pieSlices
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            EnergyStat(
-                                label = "本次耗电",
-                                value = formatAmpHours(energyState.tripNetAh),
-                                modifier = Modifier.weight(1f),
-                                color = green
-                            )
-                            EnergyStat(
-                                label = "平均能效",
-                                value = formatEfficiency(energyState.tripKmPerAh),
-                                modifier = Modifier.weight(1f),
-                                color = green
-                            )
-                            EnergyStat(
-                                label = "预计里程",
-                                value = formatRange(energyState.estimatedRangeKm),
-                                modifier = Modifier.weight(1f),
-                                color = green
-                            )
-                        }
                         Text(
-                            "本次回收 ${formatAmpHours(energyState.tripRecoveredAh)}  ·  运行累计 ${formatAmpHours(energyState.sessionNetAh)}  /  ${formatDistance(energyState.sessionDistanceKm)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (isDark) 0.64f else 0.56f),
-                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                            when {
+                                readinessText != null -> readinessText
+                                energyState.motionState == TripMotionState.IDLE -> "起步后开始生成能效曲线"
+                                else -> "正在积累有效里程与耗电数据…"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f)
                         )
                     }
-            } else if (chartPoints.size >= 2) {
-                EChartsLine(
-                    points = chartPoints,
-                    name = "近60秒能效",
-                    unit = "km/Ah",
-                    color = green,
-                    modifier = Modifier.fillMaxSize(),
-                    decimals = 2,
-                    showArea = true,
-                    windowMs = 60_000L,
-                    windowStepMs = 500L,
-                    showExtrema = true,
-                    pieSlices = pieSlices
-                )
-            } else {
-                Box(
-                    modifier = Modifier.fillMaxSize().clickable { showStats = true },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        when {
-                            readinessText != null -> readinessText
-                            energyState.motionState == TripMotionState.IDLE -> "起步后开始生成能效曲线"
-                            else -> "正在积累有效里程与耗电数据…"
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f)
-                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun EnergyStatsPanel(
+    distanceLabel: String,
+    distance: Float,
+    energyLabel: String,
+    netAh: Float,
+    efficiencyLabel: String,
+    efficiency: Float?,
+    footer: String,
+    green: Color,
+    isDark: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.SpaceEvenly) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            EnergyStat(distanceLabel, formatDistance(distance), Modifier.weight(1f), green)
+            EnergyStat(energyLabel, formatAmpHours(netAh), Modifier.weight(1f), green)
+            EnergyStat(efficiencyLabel, formatEfficiency(efficiency), Modifier.weight(1f), green)
+        }
+        Text(
+            footer,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (isDark) 0.64f else 0.56f),
+            modifier = Modifier.align(Alignment.CenterHorizontally)
+        )
     }
 }
 
