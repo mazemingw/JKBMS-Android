@@ -4,6 +4,12 @@
 
 This file records major user-visible changes to JKBMS-Android.
 
+## 1.3.1 (19) - 2026-11-18
+
+- Moved units beside values in the large dashboard cards, main gauge, and gauge side cards, removing duplicate unit badges in the upper-right corner.
+- Preserved text scaling and checked that values and units fit on one line in both layouts.
+- Uses the same signing key as 1.3.0 and can update it in place.
+
 ## 1.3.0 (18) - 2026-11-18
 
 ### Fixes and Energy

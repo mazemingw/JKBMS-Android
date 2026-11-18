@@ -152,10 +152,7 @@ fun InfoPage(
         val powerHint = buildPowerHint(metrics)
         val energyHint = buildRemainingEnergyHint(metrics)
         val capacityHint = buildRemainingCapacityHint(metrics)
-        val powerIconContainerColor = Color(0xFF81C784).copy(alpha = if (isDark) 0.50f else 0.42f)
         val topCardValueColor = metricGreen
-        val topCardIconContainerColor = Color(0xFF81C784).copy(alpha = if (isDark) 0.50f else 0.42f)
-        val topCardBadgeColor = if (isDark) Color.White.copy(alpha = 0.60f) else colorScheme.onSurface.copy(alpha = 0.55f)
         val topItems = buildTopMetricItems(
             metrics = metrics,
             powerHint = powerHint,
@@ -164,9 +161,6 @@ fun InfoPage(
             topCardValueColor = topCardValueColor,
             topCardTitleColor = topCardTitleColor,
             topCardSubtitleColor = topCardSubtitleColor,
-            topCardIconContainerColor = topCardIconContainerColor,
-            powerIconContainerColor = powerIconContainerColor,
-            topCardBadgeColor = topCardBadgeColor,
             gaugeCurrentMax = gaugeCurrentMax,
             gaugePowerMax = gaugePowerMax,
             gaugeVoltageMax = gaugeVoltageMax
@@ -352,7 +346,7 @@ private fun BigMetricCard(
                 Text(item.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = resolvedTitleColor)
                 MetricValueText(
                     value = item.value,
-                    unit = item.badgeText,
+                    unit = item.unit,
                     style = MaterialTheme.typography.headlineMedium,
                     color = item.valueColor
                 )
@@ -365,20 +359,6 @@ private fun BigMetricCard(
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(10.dp)
-                    .size(28.dp)
-                    .background(item.iconContainerColor, CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = item.badgeText,
-                    color = item.badgeColor,
-                    style = MaterialTheme.typography.labelMedium
-                )
-            }
         }
     }
 }
@@ -559,10 +539,9 @@ private fun EnergyStatsPanel(
 private fun EnergyStat(label: String, value: String, modifier: Modifier, color: Color) {
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(label, style = MaterialTheme.typography.labelMedium)
-        Text(
-            value,
+        FittedValueText(
+            AnnotatedString(value),
             style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
             color = color,
             textAlign = TextAlign.Center
         )
@@ -593,9 +572,7 @@ private data class TopMetricItem(
     val valueColor: Color = Color(0xFF448AFF),
     val titleColor: Color? = null,
     val subtitleColor: Color = Color(0xFF448AFF),
-    val iconContainerColor: Color = Color(0xFF448AFF),
-    val badgeColor: Color = Color.White,
-    val badgeText: String = "",
+    val unit: String = "",
     val gaugeValue: Float = 0f,
     val gaugeMin: Float = 0f,
     val gaugeMax: Float = 100f,
@@ -613,9 +590,6 @@ private fun buildTopMetricItems(
     topCardValueColor: Color,
     topCardTitleColor: Color,
     topCardSubtitleColor: Color,
-    topCardIconContainerColor: Color,
-    powerIconContainerColor: Color,
-    topCardBadgeColor: Color,
     gaugeCurrentMax: Float,
     gaugePowerMax: Float,
     gaugeVoltageMax: Float
@@ -644,9 +618,7 @@ private fun buildTopMetricItems(
             valueColor = topCardValueColor,
             titleColor = topCardTitleColor,
             subtitleColor = topCardSubtitleColor,
-            iconContainerColor = topCardIconContainerColor,
-            badgeColor = topCardBadgeColor,
-            badgeText = "A",
+            unit = "A",
             gaugeValue = currentValue ?: 0f,
             gaugeMin = -currentMax,
             gaugeMax = currentMax,
@@ -661,9 +633,7 @@ private fun buildTopMetricItems(
             valueColor = topCardValueColor,
             titleColor = topCardTitleColor,
             subtitleColor = topCardSubtitleColor,
-            iconContainerColor = powerIconContainerColor,
-            badgeColor = topCardBadgeColor,
-            badgeText = "W",
+            unit = "W",
             gaugeValue = powerValue ?: 0f,
             gaugeMin = -powerMax,
             gaugeMax = powerMax,
@@ -678,9 +648,7 @@ private fun buildTopMetricItems(
             valueColor = topCardValueColor,
             titleColor = topCardTitleColor,
             subtitleColor = topCardSubtitleColor,
-            iconContainerColor = topCardIconContainerColor,
-            badgeColor = topCardBadgeColor,
-            badgeText = "%",
+            unit = "%",
             gaugeValue = socValue ?: 0f,
             gaugeMin = 0f,
             gaugeMax = 100f,
@@ -696,9 +664,7 @@ private fun buildTopMetricItems(
             valueColor = topCardValueColor,
             titleColor = topCardTitleColor,
             subtitleColor = topCardSubtitleColor,
-            iconContainerColor = topCardIconContainerColor,
-            badgeColor = topCardBadgeColor,
-            badgeText = "V",
+            unit = "V",
             gaugeValue = voltageValue ?: 0f,
             gaugeMin = voltageMin,
             gaugeMax = voltageMax,
@@ -1000,26 +966,6 @@ private fun GaugeMetricCard(
                 color = item.titleColor ?: MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.align(Alignment.TopStart)
             )
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .size(28.dp)
-                    .background(
-                        when {
-                            item.gaugeOverflow -> Color(0xFFFF3B30).copy(alpha = 0.85f)
-                            item.isDischargeState -> Color(0xFFEF6C00).copy(alpha = 0.78f)
-                            else -> item.iconContainerColor
-                        },
-                        CircleShape
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = item.badgeText,
-                    color = item.badgeColor,
-                    style = MaterialTheme.typography.labelMedium
-                )
-            }
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1028,7 +974,7 @@ private fun GaugeMetricCard(
             ) {
                 MetricValueText(
                     value = item.value,
-                    unit = item.badgeText,
+                    unit = item.unit,
                     style = MaterialTheme.typography.headlineMedium,
                     color = gaugeValueColor,
                     textAlign = TextAlign.Center
@@ -1081,7 +1027,7 @@ private fun SmallTopMetricCard(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 Column(
                     modifier = Modifier.fillMaxSize(),
@@ -1089,32 +1035,19 @@ private fun SmallTopMetricCard(
                 ) {
                 Text(
                     item.title,
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = item.titleColor ?: MaterialTheme.colorScheme.onSurface
                 )
                     MetricValueText(
                         value = item.value,
-                        unit = item.badgeText,
+                        unit = item.unit,
                         style = MaterialTheme.typography.titleLarge,
                         color = item.valueColor
                     )
-                    Text(
-                        item.subtitle?.ifBlank { " " } ?: " ",
+                    FittedValueText(
+                        AnnotatedString(item.subtitle?.ifBlank { " " } ?: " "),
                         style = MaterialTheme.typography.labelSmall,
                         color = item.subtitleColor
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .size(22.dp)
-                        .background(item.iconContainerColor, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = item.badgeText,
-                        color = item.badgeColor,
-                        style = MaterialTheme.typography.labelSmall
                     )
                 }
             }
@@ -1147,10 +1080,9 @@ private fun HighlightMetricCard(
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold
             )
-            Text(
-                value,
+            FittedValueText(
+                AnnotatedString(value),
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
                 color = valueColor ?: Color(0xFF41CD52),
                 textAlign = TextAlign.End,
                 modifier = Modifier.weight(1f)
@@ -1177,10 +1109,12 @@ private fun CompactMetricCard(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text("$title：", style = MaterialTheme.typography.labelSmall)
-            Text(
-                value,
+            FittedValueText(
+                AnnotatedString(value),
                 style = MaterialTheme.typography.bodySmall,
-                color = valueColor ?: Color(0xFF41CD52)
+                color = valueColor ?: Color(0xFF41CD52),
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.End
             )
         }
     }
@@ -1204,7 +1138,7 @@ private fun CellMetricCard(
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Text(title, style = MaterialTheme.typography.labelSmall)
-            Text(value, style = MaterialTheme.typography.bodySmall, color = valueColor)
+            FittedValueText(AnnotatedString(value), style = MaterialTheme.typography.bodySmall, color = valueColor)
         }
     }
 }
@@ -1503,16 +1437,45 @@ private fun MetricValueText(
     textAlign: TextAlign = TextAlign.Start
 ) {
     val text = remember(value, unit) { buildBigMetricValueText("$value\u00A0$unit") }
+    FittedValueText(text, style, color, textAlign = textAlign)
+}
+
+@Composable
+private fun FittedValueText(
+    text: AnnotatedString,
+    style: TextStyle,
+    color: Color,
+    modifier: Modifier = Modifier,
+    textAlign: TextAlign = TextAlign.Start
+) {
     val measurer = rememberTextMeasurer()
     var availablePx by remember { mutableStateOf(0) }
     val boldStyle = style.copy(fontWeight = FontWeight.Bold)
-    val measuredPx = measurer.measure(text, boldStyle, softWrap = false).size.width.coerceAtLeast(1)
-    val scale = if (availablePx > 0) (availablePx.toFloat() / measuredPx).coerceIn(0.1f, 1f) else 1f
-    Box(Modifier.fillMaxWidth().onSizeChanged { availablePx = it.width }) {
+    val fittedStyle = remember(text, boldStyle, availablePx, measurer) {
+        val targetPx = (availablePx - 2).coerceAtLeast(1)
+        if (availablePx <= 0 || measurer.measure(text, boldStyle, softWrap = false).size.width <= targetPx) {
+            boldStyle
+        } else {
+            // Remeasure at the actual font size: font hinting and rounding are not linear.
+            var low = 0.1f
+            var high = 1f
+            repeat(10) {
+                val candidate = (low + high) / 2f
+                val candidateStyle = boldStyle.copy(fontSize = boldStyle.fontSize * candidate)
+                if (measurer.measure(text, candidateStyle, softWrap = false).size.width <= targetPx) {
+                    low = candidate
+                } else {
+                    high = candidate
+                }
+            }
+            boldStyle.copy(fontSize = boldStyle.fontSize * low)
+        }
+    }
+    Box(modifier.fillMaxWidth().onSizeChanged { availablePx = it.width }) {
         Text(
             text = text,
             modifier = Modifier.fillMaxWidth(),
-            style = boldStyle.copy(fontSize = boldStyle.fontSize * scale),
+            style = fittedStyle,
             color = color,
             maxLines = 1,
             softWrap = false,

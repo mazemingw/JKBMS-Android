@@ -4,7 +4,7 @@
 
 JKBMS-Android is a third-party Android app for JK battery management systems. It reads battery data directly over Bluetooth: cell voltages, current, power, temperatures, remaining charge, and alarms. With GPS speed available, it can also estimate riding efficiency and remaining range. No account is needed, and settings and statistics stay on the device.
 
-The current release is **1.3.0 (18)** and requires Android 8.1 or later. This release addresses disappearing navigation in compact mode and stalled Bluetooth sessions after returning from the background, and adds automatic recording, speed curves, and two configurable charts. See the [changelog](CHANGELOG_EN.md) for details.
+The current release is **1.3.1 (19)** and requires Android 8.1 or later. Recent updates address disappearing navigation in compact mode and stalled Bluetooth sessions after returning from the background, and add automatic recording, speed curves, and two configurable charts. Units now sit beside their values throughout the dashboard and gauge layout. See the [changelog](CHANGELOG_EN.md) for details.
 
 ## Installing and connecting
 

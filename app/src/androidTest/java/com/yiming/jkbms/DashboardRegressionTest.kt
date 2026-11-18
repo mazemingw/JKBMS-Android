@@ -1,6 +1,7 @@
 package com.yiming.jkbms
 
 import android.content.Context
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.semantics.SemanticsActions
@@ -10,6 +11,7 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.lifecycle.ViewModelProvider
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -85,21 +87,46 @@ class DashboardRegressionTest {
         }
         compose.onNodeWithText("MOCK").performClick()
         compose.waitUntil(5_000L) { model.chartSamples.count { it.voltage != null && it.speedKmh != null } >= 2 }
-        val unitValues = compose.onAllNodes(SemanticsMatcher("value and unit") { node ->
-            node.config.getOrNull(SemanticsProperties.Text)?.any {
-                it.text.contains('\u00A0')
-            } == true
-        }).fetchSemanticsNodes()
-        assertEquals(5, unitValues.size)
-        unitValues.forEach { node ->
-            val layouts = mutableListOf<TextLayoutResult>()
-            compose.runOnIdle { node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts) }
-            assertEquals(1, layouts.single().lineCount)
-            assertFalse(layouts.single().didOverflowWidth)
+        assertUnitsOnlyBesideValues()
+        // The gauge has a continuous frame animation. Freeze the test clock for layout checks.
+        compose.mainClock.autoAdvance = false
+        try {
+            compose.runOnIdle { model.gaugeEnabled = true }
+            repeat(4) {
+                compose.mainClock.advanceTimeByFrame()
+                compose.waitForIdle()
+            }
+            assertUnitsOnlyBesideValues()
+        } finally {
+            compose.runOnUiThread { model.gaugeEnabled = false }
+            repeat(4) {
+                compose.mainClock.advanceTimeByFrame()
+                compose.waitForIdle()
+            }
+            compose.mainClock.autoAdvance = true
         }
         compose.onNodeWithText("图表").performClick()
         compose.onNodeWithText("图表 1 · 电压 (V) ▾").assertIsDisplayed()
         compose.onNodeWithText("图表 2 · 速度 (km/h) ▾").assertIsDisplayed()
         assertTrue(model.chartRecording)
     }
+
+    private fun assertUnitsOnlyBesideValues() {
+        listOf("A", "W", "%", "V").forEach { unit ->
+            compose.onAllNodesWithText(unit, useUnmergedTree = true).assertCountEquals(0)
+        }
+        val unitValues = compose.onAllNodes(SemanticsMatcher("value and unit") { node ->
+            node.config.getOrNull(SemanticsProperties.Text)?.any {
+                it.text.contains('\u00A0')
+            } == true
+        }, useUnmergedTree = true).fetchSemanticsNodes()
+        assertEquals(5, unitValues.size)
+        unitValues.forEach { node ->
+            val layouts = mutableListOf<TextLayoutResult>()
+            compose.runOnIdle { node.config[SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts) }
+            assertEquals(1, layouts.single().lineCount)
+            assertFalse("Overflowed unit value: ${node.config[SemanticsProperties.Text]}", layouts.single().didOverflowWidth)
+        }
+    }
+
 }
