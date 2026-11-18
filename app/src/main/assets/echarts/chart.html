@@ -44,7 +44,7 @@
         const recoveryPercent = pieTotal > 0 && recoverySlice
             ? Number(recoverySlice.value) / pieTotal * 100
             : 0;
-        const finiteData = data.filter(item => Number.isFinite(Number(item.value[1])));
+        const finiteData = data.filter(item => item.value[1] !== null && Number.isFinite(Number(item.value[1])));
         const maxPoint = finiteData.reduce(
             (best, item) => !best || item.value[1] > best.value[1] ? item : best,
             null
@@ -166,7 +166,7 @@
                 backgroundColor: payload.dark ? 'rgba(15,23,42,.94)' : 'rgba(255,255,255,.96)',
                 borderColor: payload.color,
                 textStyle: { color: text, fontSize: 11 },
-                valueFormatter: value => Number(value).toFixed(payload.decimals) + ' ' + payload.unit
+                valueFormatter: value => value == null ? '-' : Number(value).toFixed(payload.decimals) + ' ' + payload.unit
             },
             xAxis: {
                 type: windowSlots ? 'value' : 'time',

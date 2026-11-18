@@ -19,6 +19,8 @@ class MainViewModel : ViewModel() {
     var energyState by mutableStateOf(EnergyUiState())
         private set
     val energyTracker = EnergyTracker { energyState = it }
+    var energyHistoryRestored = false
+    var energyBeforeMock: EnergyUiState? = null
     var passwordInput by mutableStateOf("")
     var statusText by mutableStateOf("待机")
     var scanButtonText by mutableStateOf("开始扫描")
@@ -45,8 +47,10 @@ class MainViewModel : ViewModel() {
     var bleConnected by mutableStateOf(false)
     var bleSignalRssi by mutableStateOf<Int?>(null)
     var bleActivityFlash by mutableStateOf(false)
-    var chartRecording by mutableStateOf(false)
+    var chartRecording by mutableStateOf(true)
     var chartPlayback by mutableStateOf(false)
     var chartSource by mutableStateOf(ChartMetricSource.VOLTAGE)
+    var secondChartSource by mutableStateOf(ChartMetricSource.SPEED)
+    var secondChartEnabled by mutableStateOf(true)
     var chartSamples by mutableStateOf(listOf<TrendSample>())
 }

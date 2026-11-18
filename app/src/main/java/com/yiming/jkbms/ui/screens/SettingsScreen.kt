@@ -273,7 +273,7 @@ fun SettingsPage(
                 Column {
                     Text("分屏信息", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "小窗/分屏时仅显示板上指标，并隐藏底部导航",
+                        "仅在系统分屏/小窗的信息页隐藏底部导航；可点“恢复导航”或按返回键退出",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
                     )

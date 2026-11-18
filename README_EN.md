@@ -1,228 +1,82 @@
 # JKBMS-Android
 
-[简体中文](README.md) | [English](README_EN.md)
+[简体中文](README.md) · [English](README_EN.md)
 
-JKBMS-Android is an unofficial Android client for JK BMS, built with Kotlin and Jetpack Compose. It connects directly to a battery management system over BLE and displays cell voltages, current, pack voltage, power, temperatures, SOC, alarms, and other status data without relying on the manufacturer's cloud service.
+JKBMS-Android is a third-party Android app for JK battery management systems. It reads battery data directly over Bluetooth: cell voltages, current, power, temperatures, remaining charge, and alarms. With GPS speed available, it can also estimate riding efficiency and remaining range. No account is needed, and settings and statistics stay on the device.
 
-Current version: `1.2.8 (17)`. Minimum supported version: Android 8.1 (API 27).
+The current release is **1.3.0 (18)** and requires Android 8.1 or later. This release addresses disappearing navigation in compact mode and stalled Bluetooth sessions after returning from the background, and adds automatic recording, speed curves, and two configurable charts. See the [changelog](CHANGELOG_EN.md) for details.
 
-See [CHANGELOG_EN.md](CHANGELOG_EN.md) for release history. The Chinese changelog is available in [CHANGELOG.md](CHANGELOG.md).
+## Installing and connecting
 
-> This is not an official JK product. Protocol behavior may differ between hardware and firmware versions. Decisions involving vehicle or battery safety should be based on the BMS, vehicle instrumentation, and physical measurements.
+Download the APK from [GitHub Releases](https://github.com/mazemingw/JKBMS-Android/releases).
 
-## Features
+**Version 1.3.0 uses a new signing key.** If you have the official 1.2.8 release or an older debug build installed, uninstall it before installing this version. Uninstalling clears local settings and statistics, so save any information you need first. Future releases using the new key can be installed as updates.
 
-- Scan for and connect directly to a JK BMS, verify its device password, and read live status data.
-- View runtime, BLE status, GPS speed, the main power gauge, current, SOC, voltage, and board metrics on one dashboard.
-- Keep the main gauge on Compose Canvas, with selectable voltage/current/power modes, bidirectional values, and a smoke animation.
-- Record voltage, current, power, and SOC using bundled offline ECharts, with a rolling 60-second view and full-record playback.
-- Combine GPS speed and BMS current to calculate riding efficiency, recovered charge, and estimated remaining range.
-- Simulate acceleration, cruising, regenerative braking, urban speed changes, and stops with MOCK driving mode.
-- Choose dark, light, or system theme, application font, speed card visibility, compact split-screen mode, and gauge ranges.
-- Automatically reconnect after stale BLE data. While MOCK is active, real BMS frames are cached instead of competing with simulated UI data.
-- Optionally keep energy collection active in the background with a foreground service, persistent notification, and partial wake lock.
-- Switch the energy card among Chart, TRIP A, and TOTAL with one button in the upper-right corner. TOTAL distance and average efficiency persist across launches.
-- Use a floating translucent capsule bottom navigation bar, and optionally hide the MOCK button on the home screen.
+Open the Bluetooth tab, allow nearby-device access, scan for your BMS, select it, and enter its device password. Older Android versions also require location access for Bluetooth scanning. GPS speed and efficiency estimates need precise location permission. The dashboard begins updating after the device password is verified.
 
-## Riding Efficiency
+The app remembers the last successful device and password and tries to reconnect on the next launch. If battery data stops arriving, stale readings are cleared and the connection is retried. During normal collection, about three seconds without a valid battery frame triggers recovery; connection setup, service discovery, and authentication have a fifteen-second timeout. Corrupt packets cannot keep old readings alive.
 
-The energy tracker combines GPS speed with BMS current and uses trapezoidal integration against a monotonic clock. The current-direction convention used for JK BMS data in this project is:
+## Using the dashboard
 
-- Negative current: discharge.
-- Positive current: charging or regenerative braking while riding.
+The home page shows runtime, Bluetooth status, GPS speed, current, power, charge level, and pack voltage. Scroll down for alarms, board readings, and individual cell voltages. Values and units stay on the same line, with text scaled to fit narrower cards.
 
-The calculations are:
+Tap the speed card to toggle GPS. Settings let you choose the main gauge, its source and range, the theme and font, and whether the speed and energy panels are visible.
 
-```text
-Discharged Ah = ∫ max(-current, 0) dt
-Recovered Ah  = ∫ max( current, 0) dt
-Net used Ah   = discharged Ah - recovered Ah
-Distance km   = ∫ GPS speed dt
-Efficiency km/Ah = distance ÷ net used Ah
-Estimated range km = remaining BMS capacity Ah × valid efficiency km/Ah
-```
+The energy card opens with trip statistics. If a previous trip was saved, its distance, consumption, and efficiency appear immediately, even before the BMS reconnects. A newly confirmed ride replaces those values. Tap the upper-right label to cycle through TRIP A, TOTAL, and the recent efficiency curve. TRIP A covers one ride; TOTAL persists across launches. Clearing TOTAL asks for confirmation and preserves the current trip.
 
-The UI uses the two-wheel-friendly `1Ah Xkm` format. For example, `1Ah 3.0km` means the vehicle can travel approximately 3 km per 1 Ah consumed. Regeneration reduces net consumption and therefore improves the final `km/Ah` result.
+Compact information mode applies only when Android reports a multi-window session and the information page is open. Fullscreen phones keep their navigation. Compact mode also has a restore-navigation button and a system Back escape, so clearing app data is unnecessary.
 
-### Time Ranges for the Line and Pie Charts
+The MOCK button generates acceleration, cruising, regeneration, stops, and restarts for trying the interface without a BMS. With GPS enabled, it supplies simulated speed too. Mock readings do not enter TOTAL or overwrite the saved real trip. You can hide the button in Settings.
 
-| View | Data range | Meaning |
-| --- | --- | --- |
-| Efficiency line | Latest 60 seconds | Rolling efficiency at about 2 Hz; old points leave from the left and MAX/MIN mark the current window |
-| Discharge/recovery pie | Entire current trip | Orange is cumulative discharge and green is cumulative recovery; the recovery share is shown below |
-| TRIP A | Current trip | Current distance, net consumption, trip efficiency, recovered charge, and estimated range |
-| TOTAL | Persistent lifetime total | Total distance, total net consumption, long-term average efficiency, and cumulative recovery across app restarts |
+## Recording and charts
 
-The recovery share is:
+Recording starts when battery data arrives; opening the chart page first is unnecessary. Voltage, current, power, charge level, and valid GPS speed are recorded. Speed can continue independently during a temporary BMS outage. Missing readings create visible gaps.
+
+Two charts initially show voltage and speed. Tap either title to choose its source independently, or switch to a single chart. The layout and both selections are saved. Charts stack on a phone and sit side by side when the window is wide enough.
+
+Live mode shows the latest sixty seconds. Full-record playback uses a snapshot taken when you enter playback, while collection continues. Pausing and resuming keeps existing samples. Up to 7,200 samples are retained in the current app process; curves are not saved as historical recordings after the process ends.
+
+ECharts ships inside the APK and works offline. The main dashboard gauge uses Compose Canvas.
+
+## Understanding efficiency
+
+The tracker combines reliable GPS speed with BMS current. Integrating speed gives distance; integrating current gives discharged and recovered amp-hours. JK current is treated as negative for discharge and positive for charging or regeneration.
 
 ```text
-Recovery share = recovered Ah ÷ (discharged Ah + recovered Ah)
+Net consumption Ah = discharged Ah − recovered Ah
+Efficiency km/Ah = valid distance km ÷ net consumption Ah
+Estimated range km = remaining capacity Ah × efficiency km/Ah
 ```
 
-It is not the net-consumption share and is not limited to the line chart's 60-second window.
+A value such as `1Ah 3.0km` means roughly three kilometers per amp-hour consumed. Recovered charge reduces net consumption. To avoid unstable estimates just after starting, trip efficiency needs about 0.1 km and 0.01 Ah of net consumption. Range estimates use trip efficiency when available and fall back to the TOTAL average when it is not.
 
-### Start, Stop, and Pause Rules
+A ride starts after speed stays at or above 3 km/h for about three seconds. Current integration pauses immediately below 1 km/h. Fifteen seconds at low speed enters a temporary stop; resuming shortly afterward continues the same trip. About three minutes stationary ends the trip, whose results remain visible until the next confirmed start.
 
-- A trip starts after GPS speed reaches `3km/h` continuously for 3 seconds.
-- When GPS speed falls below `1km/h`, energy integration, accumulated consumption, the line chart, and the pie chart freeze immediately.
-- After 15 seconds at low speed, the tracker enters a temporary-stop state, but a short stop does not split the trip.
-- After 3 minutes without motion, the current trip ends. Its results remain visible until the next confirmed start.
-- On restart, integration resumes from a new BMS frame and never backfills energy across the stopped interval.
-- Losing GPS or stopping collection also breaks integration continuity. Unless Background Energy Collection is enabled, collection pauses when the app enters the background.
+GPS recovery and Bluetooth reconnection establish new sampling baselines without filling in the missing interval. GPS needs two consecutive fresh fixes before energy integration resumes. Old, inaccurate, or implausible fixes are ignored. This may omit some distance during poor reception, but keeps stale current and speed out of the estimate.
 
-Accessory loads such as lights or controller standby consumption while parked are therefore excluded. This metric answers “how many Ah are needed to move the vehicle,” rather than auditing all static electrical loads.
+Trip and session statistics, TOTAL, and the displayed remaining capacity are saved periodically. Restoring those results never restores old integration clocks. The app currently keeps the latest trip and cumulative totals rather than a browsable trip database.
 
-### GPS Data Quality
+Enable background energy collection in Settings to collect while using another app or locking the screen. A foreground service, persistent notification, and partial wake lock support Bluetooth and GPS collection; some phones also require allowing background activity in system settings. With the option off, energy collection pauses in the background. Collection cannot be guaranteed after the system forcibly stops the app. Reopening restores saved statistics and checks the connection.
 
-Only location results containing speed are accepted. Current tolerances require approximately `60m` accuracy or better, speed uncertainty around `5m/s` or better, a location age no greater than `2.5s`, and a speed below `200km/h`. After GPS loss, the first valid fix only rebuilds the time baseline; integration resumes after a second consecutive fresh fix. This prevents a stopped or disconnected interval from being folded into a single sample. Energy collection can continue with the home speed card hidden as long as GPS remains enabled.
+Treat these estimates as a way to understand riding habits and range changes. Road conditions, temperature, wind, and riding style affect actual range; use the BMS, vehicle instruments, and measurements when assessing battery condition. This project is unaffiliated with JK. Its parser targets tested 300-byte JK status frames, and other hardware or firmware may need adaptation.
 
-### Background Energy Collection
+## Building from source
 
-`Settings → Background energy collection` is off by default. Enabling it turns on GPS and starts a foreground service with a persistent notification. BLE polling, GPS updates, and energy integration are then kept active while the app is in the background. The service also holds a partial wake lock, which is useful during rides but increases battery usage.
-
-Android 13 and later additionally request notification permission. The location foreground service is started while the app UI is visible, so the app does not request the separate “Allow all the time” background-location permission. The foreground service and its notification explicitly communicate ongoing collection to Android and the user. If notification permission is denied, Android may still show the service in its active-apps UI, but allowing notifications is recommended. Some vendor ROMs also require enabling autostart/background operation or disabling battery optimization for this app. Collection cannot continue after force-stopping the app or disabling Bluetooth/location.
-
-### TRIP A and TOTAL
-
-- `TRIP A` follows the trip state machine, resets at the next confirmed start, and records the current trip.
-- `TOTAL` accumulates only while fresh GPS and BMS data are both available, preventing distance from increasing during a BLE outage.
-- TOTAL is saved locally about every 5 seconds and during lifecycle transitions. MOCK data never enters TOTAL.
-- `Settings → Energy panel` can hide the entire card. `Clear TOTAL` resets total distance, cumulative discharge, and cumulative recovery after confirmation without changing TRIP A.
-- `Settings → Home MOCK button` can hide the test entry point. Hiding it also stops MOCK if it is active.
-
-### Minimum Valid Samples
-
-To avoid extreme results from a tiny denominator immediately after starting:
-
-- Trip average efficiency requires about `0.1km` and `0.01Ah` net consumption.
-- TOTAL average efficiency requires about `0.1km`.
-- A 60-second trend point requires about `0.03km` and `0.003Ah`.
-
-Estimated range prefers TRIP A efficiency and falls back to the more stable TOTAL average when the current trip does not yet have enough data. It is a live estimate based on history, not a prediction of terrain, wind, temperature, or riding style.
-
-## BLE Data Path
-
-- JK service UUID: `FFE0`; read/write/notify characteristic UUID: `FFE1`.
-- Device information command: `0x97`; cell status command: `0x96`.
-- Target status-frame polling interval: `500ms`.
-- No duplicate request is sent while the previous request is pending. A retry is allowed after a `1.5s` timeout to prevent overlapping fragmented BLE responses.
-- Approximately 3 seconds without data after authentication triggers reconnection. Returning to the foreground also restarts polling, RSSI updates, and the data watchdog.
-- After disconnect, the old GATT is released and the app reconnects directly to the last successful device while foregrounded or background collection is enabled. Late callbacks from an old GATT cannot overwrite the new connection state.
-- UI state and the energy tracker update only after a status frame passes CRC validation.
-
-Faster polling improves gauge and chart responsiveness, but the actual update rate still depends on BMS firmware, connection interval, the phone's Bluetooth stack, and radio conditions.
-
-## MOCK Mode
-
-The floating home button starts a simulated ride through the same energy path as real BMS/GPS data. It covers:
-
-- Hard acceleration and high-current discharge.
-- High-speed cruising.
-- Hard deceleration with positive-current regeneration.
-- Variable urban speeds.
-- Stops and restarts.
-
-If the phone remains connected to a real BMS, MOCK prevents real and simulated data from alternating in the UI. Real frames are cached in the background, and the latest real data is restored when MOCK ends.
-
-## Chart Implementation
-
-Except for the main power gauge, line and pie charts are rendered by bundled ECharts Canvas:
-
-- The ECharts script ships inside the APK and requires no network access.
-- The one-minute window uses fixed slots and stable data-point IDs so retained data moves smoothly to the left.
-- Updates do not repeatedly force `resize()`, which would interrupt ECharts transitions.
-- General chart recording is capped at 7,200 BMS samples to prevent unbounded memory growth.
-
-## Permissions and Data
-
-The app may request:
-
-- Nearby-device scan and connection permissions on Android 12 and later.
-- Precise location for GPS speed and legacy Android BLE scanning requirements.
-- Foreground-service and wake-lock permissions for background collection, plus notification permission on Android 13 and later.
-
-The app uses only speed, accuracy, and timestamps from location results. It does not store route coordinates and needs no account or cloud service. The device password, last successful device address, TOTAL aggregates, and display settings are stored in local app preferences.
-
-## Build
-
-Use Android Studio's bundled JBR/JDK and the repository's Gradle Wrapper.
+The project uses Kotlin, Jetpack Compose, and compile SDK 36. Use **JDK 17** and the included Gradle Wrapper. The current Gradle/Kotlin combination cannot run on JDK 25. Check your local SDK path after opening the project in Android Studio, or build from a terminal:
 
 ```powershell
-# Windows PowerShell
-$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
-.\gradlew.bat testDebugUnitTest assembleDebug
+$env:JAVA_HOME = "C:\Program Files\Java\jdk-17"
+.\gradlew.bat testDebugUnitTest lintDebug assembleDebug
 ```
 
-```bash
-# macOS / Linux
-./gradlew testDebugUnitTest assembleDebug
-```
+On macOS or Linux, use `./gradlew`. The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`. With a phone or emulator connected, `connectedDebugAndroidTest` checks navigation, restored energy data, automatic recording, and chart preferences.
 
-The debug APK is generated at:
+For a signed release, set `JKBMS_KEYSTORE_PATH`, `JKBMS_KEYSTORE_PASSWORD`, `JKBMS_KEY_ALIAS`, and `JKBMS_KEY_PASSWORD` locally or through CI secrets, then run `assembleRelease`. Keys and passwords stay outside the project. Without signing configuration, the release APK is unsigned. Published signed builds are available in `app/release/app-release.apk` and GitHub Releases.
 
-```text
-app/build/outputs/apk/debug/app-debug.apk
-```
+Start with [MainActivity.kt](app/src/main/java/com/yiming/jkbms/MainActivity.kt) for Bluetooth, GPS, and page coordination, and [EnergyTracker.kt](app/src/main/java/com/yiming/jkbms/model/EnergyTracker.kt) for trip detection and integration. [BleRecoveryPolicy.kt](app/src/main/java/com/yiming/jkbms/model/BleRecoveryPolicy.kt) handles timeout decisions, and [EnergyHistoryStore.kt](app/src/main/java/com/yiming/jkbms/model/EnergyHistoryStore.kt) saves previous energy statistics. Screens live in `ui/screens`; the ECharts bridge is in `ui/components/EChartsLine.kt`, with web assets in `app/src/main/assets/echarts`.
 
-The repository's officially signed build is located at:
+Please [open an issue](https://github.com/mazemingw/JKBMS-Android/issues) if something goes wrong. Your phone and Android version, BMS model, and the steps leading up to the problem make it easier to investigate.
 
-```text
-app/release/app-release.apk
-```
+## Open-source components
 
-Most users should download the officially signed APK from [GitHub Releases](https://github.com/mazemingw/JKBMS-Android/releases). Later releases signed with the same key can be installed as in-place updates.
-
-To update an installation on a connected device:
-
-```powershell
-adb install -r -t app\build\outputs\apk\debug\app-debug.apk
-```
-
-## Tests
-
-`EnergyTrackerTest` covers:
-
-- Ah, distance, and `km/Ah` integration under constant speed/current.
-- A 15-second stop and resumed motion.
-- Positive-current regeneration reducing net consumption.
-- 500 ms trend sampling and the rolling one-minute window.
-- Immediate freezing of trip, TOTAL, and line data after GPS reaches zero.
-- No current backfill across a stopped interval.
-- Rebuilding the integration baseline with two consecutive fresh fixes after an extended GPS interruption.
-- Entering the temporary-stop state without increasing consumption while location is unavailable.
-
-Run unit tests with:
-
-```powershell
-.\gradlew.bat testDebugUnitTest
-```
-
-## Project Structure
-
-```text
-app/src/main/java/com/yiming/jkbms/
-├── MainActivity.kt                 BLE, GPS, MOCK, and UI orchestration
-├── BackgroundCollectionService.kt Foreground service, notification, and wake lock
-├── model/EnergyTracker.kt          Trip state, integration, and trend calculations
-├── model/BmsModels.kt              BMS, energy, and UI data models
-├── ui/components/EChartsLine.kt    Compose WebView/ECharts bridge
-├── ui/screens/InfoScreen.kt        Dashboard gauge, energy card, and details
-├── ui/screens/ChartScreen.kt       General trend recording and playback
-└── viewmodel/MainViewModel.kt      Screen state and energy-tracker lifecycle
-
-app/src/main/assets/echarts/
-├── chart.html                      ECharts configuration and incremental animation
-└── echarts.min.js                  Bundled ECharts runtime
-```
-
-## Known Limitations
-
-- The parser targets the 300-byte JK BMS status frame tested by this project. Other protocol versions may require additional adaptation.
-- GPS can be unreliable indoors, in tunnels, or among tall buildings. Efficiency is not calculated while positioning is unavailable.
-- TRIP A is kept only for the current app process and is not yet stored in a historical trip database. TOTAL stores aggregate values only.
-- The debug APK uses a debug signature. Configure a dedicated signing key and release build before production distribution.
-
-## Third-Party Components
-
-- [Apache ECharts](https://echarts.apache.org/) `6.1.0`, Apache License 2.0.
-- AndroidX, Jetpack Compose, and Material Components under their respective open-source licenses.
+This project uses [Apache ECharts](https://echarts.apache.org/) 6.1.0 under Apache License 2.0, along with AndroidX, Jetpack Compose, and Material Components under their respective licenses. See [LICENSE](LICENSE) for the project license.

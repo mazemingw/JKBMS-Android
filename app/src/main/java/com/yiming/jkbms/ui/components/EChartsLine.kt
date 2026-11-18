@@ -22,7 +22,7 @@ import androidx.webkit.WebViewAssetLoader
 import org.json.JSONArray
 import org.json.JSONObject
 
-data class EChartPoint(val timestampMs: Long, val value: Float)
+data class EChartPoint(val timestampMs: Long, val value: Float?)
 data class EChartPieSlice(val name: String, val value: Float, val color: Color)
 
 private class LocalChartWebView(context: android.content.Context) : WebView(context) {
@@ -126,7 +126,7 @@ private fun buildPayload(
 ): String {
     val data = JSONArray()
     points.forEach { point ->
-        data.put(JSONArray().put(point.timestampMs).put(point.value.toDouble()))
+        data.put(JSONArray().put(point.timestampMs).put(point.value?.takeIf { it.isFinite() }?.toDouble() ?: JSONObject.NULL))
     }
     return JSONObject()
         .put("name", name)

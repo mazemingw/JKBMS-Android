@@ -32,15 +32,17 @@ enum class ChartMetricSource(val label: String, val unit: String) {
     VOLTAGE("电压", "V"),
     CURRENT("电流", "A"),
     POWER("电池功率", "W"),
-    SOC("电池百分比", "%")
+    SOC("电池百分比", "%"),
+    SPEED("速度", "km/h")
 }
 
 data class TrendSample(
     val timestampMs: Long,
-    val voltage: Float,
-    val current: Float,
-    val power: Float,
-    val soc: Float
+    val voltage: Float? = null,
+    val current: Float? = null,
+    val power: Float? = null,
+    val soc: Float? = null,
+    val speedKmh: Float? = null
 )
 
 enum class TripMotionState {
@@ -55,6 +57,7 @@ data class EnergyTrendPoint(
 )
 
 data class EnergyUiState(
+    val isHistorical: Boolean = false,
     val motionState: TripMotionState = TripMotionState.IDLE,
     val tripNetAh: Float = 0f,
     val tripDischargedAh: Float = 0f,
@@ -62,6 +65,8 @@ data class EnergyUiState(
     val tripDistanceKm: Float = 0f,
     val tripKmPerAh: Float? = null,
     val sessionNetAh: Float = 0f,
+    val sessionDischargedAh: Float = 0f,
+    val sessionRecoveredAh: Float = 0f,
     val sessionDistanceKm: Float = 0f,
     val sessionKmPerAh: Float? = null,
     val totalNetAh: Float = 0f,

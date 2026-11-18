@@ -25,6 +25,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -46,17 +47,22 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.yiming.jkbms.model.BleDeviceUi
+import com.yiming.jkbms.model.BleRecoveryPolicy
+import com.yiming.jkbms.model.EnergyHistoryStore
 import com.yiming.jkbms.model.BottomTab
 import com.yiming.jkbms.model.ChartMetricSource
 import com.yiming.jkbms.model.GaugeMetricSource
@@ -94,6 +100,8 @@ class MainActivity : ComponentActivity() {
     private var bleScanner: BluetoothLeScanner? = null
     private var scanning = false
     private val prefs by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
+    private val energyHistory by lazy { EnergyHistoryStore(prefs) }
+    private var compactWindow by mutableStateOf(false)
 
     private val deviceItems = mutableListOf<BleDeviceItem>()
     private var selectedDevice: BluetoothDevice? = null
@@ -114,6 +122,8 @@ class MainActivity : ComponentActivity() {
     private var pendingBackgroundCollectionEnable = false
     private var lastBleForegroundRecoveryAtMs = 0L
     private var lastTotalPersistAtMs = 0L
+    private var connectionStartedAtMs = 0L
+    private var automaticReconnectBlocked = false
 
     private var passwordInput: String
         get() = viewModel.passwordInput
@@ -291,8 +301,8 @@ class MainActivity : ComponentActivity() {
                 showToast("MOCK阶段：$phase")
             }
             val metrics = buildMockDrivingMetrics(tick)
-            acceptMetrics(metrics)
             updateMockGpsState(tick)
+            acceptMetrics(metrics)
             uiHandler.postDelayed(this, 1000L)
         }
     }
@@ -304,17 +314,14 @@ class MainActivity : ComponentActivity() {
 
     private val clearBleFlashTask = Runnable { bleActivityFlash = false }
     private var lastBleDataAtMs: Long = 0L
-    private var bleAutoReconnecting = false
     private val bleReconnectTask = Runnable { reconnectToSavedDevice() }
     private val bleDataWatchdogTask = object : Runnable {
         override fun run() {
-            if (!bleConnected || !authenticated || gatt == null) return
-            val staleMs = System.currentTimeMillis() - lastBleDataAtMs
-            if (!bleAutoReconnecting && staleMs >= BLE_DATA_TIMEOUT_MS) {
-                triggerBleAutoReconnect()
-                return
+            checkBleSessionHealth()
+            if (!isDestroyed && !automaticReconnectBlocked &&
+                (gatt != null || ((appInForeground || backgroundCollectionEnabled) && autoReconnectAddress != null))) {
+                uiHandler.postDelayed(this, BLE_WATCHDOG_INTERVAL_MS)
             }
-            uiHandler.postDelayed(this, BLE_WATCHDOG_INTERVAL_MS)
         }
     }
     private var gpsUpdating = false
@@ -358,11 +365,17 @@ class MainActivity : ComponentActivity() {
             val plausibleSpeed = speed in 0f..GPS_ENERGY_MAX_SPEED_KMH
             val bmsFreshEnough = mockChargingSample ||
                 (authenticated && lastRealMetrics != null &&
-                    System.currentTimeMillis() - lastBleDataAtMs <= BLE_DATA_TIMEOUT_MS)
+                    SystemClock.elapsedRealtime() - lastBleDataAtMs < BLE_DATA_TIMEOUT_MS)
             val gpsUsable = location.hasSpeed() && accurateEnough && speedAccurateEnough &&
                 freshEnough && plausibleSpeed
             val usableForEnergy = gpsUsable && bmsFreshEnough
             updateGpsSignalState(if (gpsUsable) GpsSignalState.READY else GpsSignalState.SEARCHING)
+            if (chartRecording && !mockChargingSample && !bmsFreshEnough) {
+                appendTrendSample(TrendSample(
+                    timestampMs = System.currentTimeMillis(),
+                    speedKmh = speed.takeIf { gpsUsable }
+                ))
+            }
             if (usableForEnergy) {
                 viewModel.energyTracker.onSpeedSample(
                     speedKmh = speed,
@@ -444,6 +457,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        compactWindow = isInMultiWindowMode
         val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
         locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
         bluetoothAdapter = bluetoothManager.adapter
@@ -465,18 +479,28 @@ class MainActivity : ComponentActivity() {
         gaugePowerMax = parsePositiveFloat(prefs.getFloat(PREF_GAUGE_POWER_MAX, 3000f), 3000f)
         gaugeVoltageMax = parsePositiveFloat(prefs.getFloat(PREF_GAUGE_VOLTAGE_MAX, 86f), 86f)
         autoReconnectAddress = prefs.getString(PREF_LAST_SUCCESS_DEVICE_ADDRESS, null)?.takeIf { it.isNotBlank() }
+        chartSource = parseChartSource(prefs.getString(PREF_CHART_SOURCE, null), ChartMetricSource.VOLTAGE)
+        viewModel.secondChartSource = parseChartSource(prefs.getString(PREF_SECOND_CHART_SOURCE, null), ChartMetricSource.SPEED)
+        viewModel.secondChartEnabled = prefs.getBoolean(PREF_SECOND_CHART_ENABLED, true)
         viewModel.energyTracker.restoreTotal(
             dischargedAh = prefs.getFloat(PREF_TOTAL_DISCHARGED_AH, 0f),
             recoveredAh = prefs.getFloat(PREF_TOTAL_RECOVERED_AH, 0f),
             distanceKm = prefs.getFloat(PREF_TOTAL_DISTANCE_KM, 0f)
         )
+        if (!viewModel.energyHistoryRestored) {
+            energyHistory.read()?.let(viewModel.energyTracker::restoreLastSession)
+            viewModel.energyHistoryRestored = true
+        }
 
         setContent {
             JkBmsTheme(useAppFont = useAppFont, themeMode = themeMode) {
-                val configuration = LocalConfiguration.current
-                val isSmallWindow = configuration.screenWidthDp < 700 || configuration.screenHeightDp < 560 ||
-                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && this@MainActivity.isInMultiWindowMode)
-                val splitInfoActive = splitScreenInfoOnly && isSmallWindow
+                val splitInfoActive = splitScreenInfoOnly && compactWindow && selectedTab == BottomTab.INFO
+                val restoreNavigation = {
+                    splitScreenInfoOnly = false
+                    prefs.edit().putBoolean(PREF_SPLIT_SCREEN_INFO_ONLY, false).apply()
+                    selectedTab = BottomTab.SETTINGS
+                }
+                BackHandler(enabled = splitInfoActive, onBack = restoreNavigation)
                 Scaffold(
                     floatingActionButton = {
                         if (!splitInfoActive && selectedTab == BottomTab.INFO && showMockButton) {
@@ -515,7 +539,7 @@ class MainActivity : ComponentActivity() {
                     ) {
                         when (selectedTab) {
                             BottomTab.INFO -> InfoPage(
-                                    modifier = Modifier.fillMaxSize(),
+                                    modifier = Modifier.fillMaxSize().padding(top = if (splitInfoActive) 40.dp else 0.dp),
                                     metrics = latestMetrics,
                                     energyState = viewModel.energyState,
                                     bleConnected = bleConnected,
@@ -574,10 +598,23 @@ class MainActivity : ComponentActivity() {
                             BottomTab.CHART -> ChartPage(
                                 modifier = Modifier.fillMaxSize(),
                                 chartSource = chartSource,
+                                secondChartSource = viewModel.secondChartSource,
+                                secondChartEnabled = viewModel.secondChartEnabled,
                                 recording = chartRecording,
                                 playback = chartPlayback,
                                 samples = chartSamples,
-                                onSourceChange = { chartSource = it },
+                                onSourceChange = {
+                                    chartSource = it
+                                    prefs.edit().putString(PREF_CHART_SOURCE, it.name).apply()
+                                },
+                                onSecondSourceChange = {
+                                    viewModel.secondChartSource = it
+                                    prefs.edit().putString(PREF_SECOND_CHART_SOURCE, it.name).apply()
+                                },
+                                onSecondChartEnabledChange = {
+                                    viewModel.secondChartEnabled = it
+                                    prefs.edit().putBoolean(PREF_SECOND_CHART_ENABLED, it).apply()
+                                },
                                 onToggleRecord = {
                                     if (chartRecording) {
                                         stopChartRecording()
@@ -587,9 +624,6 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onTogglePlayback = {
                                     chartPlayback = !chartPlayback
-                                    if (chartPlayback && chartRecording) {
-                                        stopChartRecording(silent = true)
-                                    }
                                 }
                             )
                             BottomTab.SETTINGS -> SettingsPage(
@@ -658,6 +692,11 @@ class MainActivity : ComponentActivity() {
                                 }
                             )
                         }
+                        if (splitInfoActive) {
+                            TextButton(onClick = restoreNavigation, modifier = Modifier.align(Alignment.TopEnd)) {
+                                Text("恢复导航")
+                            }
+                        }
                     }
                 }
             }
@@ -690,6 +729,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean, newConfig: Configuration) {
+        super.onMultiWindowModeChanged(isInMultiWindowMode, newConfig)
+        compactWindow = isInMultiWindowMode
+    }
+
     override fun onResume() {
         super.onResume()
         val gpsSessionAgeMs = System.currentTimeMillis() - lastGpsStartAtMs
@@ -700,17 +744,18 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        persistTotalEnergy(force = true)
         super.onStop()
         appInForeground = false
         if (backgroundCollectionEnabled && startBackgroundCollectionService()) {
             viewModel.energyTracker.setCollecting(true)
             applyGpsTrackingState()
         } else {
+            appendChartGap()
             viewModel.energyTracker.setCollecting(false)
             stopGpsUpdates()
             uiHandler.removeCallbacks(mockDriveTask)
         }
+        persistTotalEnergy(force = true)
     }
 
     override fun onDestroy() {
@@ -724,6 +769,7 @@ class MainActivity : ComponentActivity() {
         uiHandler.removeCallbacks(mockDriveTask)
         uiHandler.removeCallbacks(bleDataWatchdogTask)
         uiHandler.removeCallbacks(bleReconnectTask)
+        uiHandler.removeCallbacksAndMessages(null)
     }
 
     private fun requiredPermissions(): Array<String> {
@@ -850,7 +896,6 @@ class MainActivity : ComponentActivity() {
 
     private fun startBleWatchdog() {
         uiHandler.removeCallbacks(bleDataWatchdogTask)
-        if (lastBleDataAtMs == 0L) lastBleDataAtMs = System.currentTimeMillis()
         uiHandler.postDelayed(bleDataWatchdogTask, BLE_WATCHDOG_INTERVAL_MS)
     }
 
@@ -863,33 +908,42 @@ class MainActivity : ComponentActivity() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastBleForegroundRecoveryAtMs < BLE_FOREGROUND_RECOVERY_DEBOUNCE_MS) return
         lastBleForegroundRecoveryAtMs = now
-        if (!hasAllRequiredPermissions() || !isBluetoothEnabled() || mockChargingSample) return
+        checkBleSessionHealth()
+        if (gatt != null && authenticated) {
+            uiHandler.removeCallbacks(pollTask)
+            uiHandler.post(pollTask)
+            uiHandler.removeCallbacks(pollRssiTask)
+            uiHandler.post(pollRssiTask)
+        }
+        startBleWatchdog()
+    }
 
-        val activeGatt = gatt
-        when {
-            activeGatt != null && bleConnected && authenticated -> {
-                uiHandler.removeCallbacks(pollTask)
-                uiHandler.post(pollTask)
-                uiHandler.removeCallbacks(pollRssiTask)
-                uiHandler.post(pollRssiTask)
-                startBleWatchdog()
-                if (System.currentTimeMillis() - lastBleDataAtMs >= BLE_DATA_TIMEOUT_MS) {
-                    triggerBleAutoReconnect()
-                }
+    private fun checkBleSessionHealth() {
+        if (mockChargingSample || automaticReconnectBlocked) return
+        if (!hasAllRequiredPermissions() || !isBluetoothEnabled()) {
+            if (gatt != null) disconnectGatt()
+            return
+        }
+        if (BleRecoveryPolicy.needsReconnect(
+                hasGatt = gatt != null,
+                authenticated = authenticated,
+                connectionStartedMs = connectionStartedAtMs,
+                lastMetricsMs = lastBleDataAtMs.takeIf { it > 0L },
+                nowMs = SystemClock.elapsedRealtime()
+            )) {
+            if (!appInForeground && !backgroundCollectionEnabled) {
+                if (gatt != null) disconnectGatt()
+            } else if (gatt == null) {
+                reconnectToSavedDevice()
+            } else {
+                triggerBleAutoReconnect()
             }
-
-            activeGatt != null && bleConnected -> {
-                setStatus("正在恢复蓝牙服务与通知...")
-                activeGatt.discoverServices()
-            }
-
-            else -> reconnectToSavedDevice()
         }
     }
 
     @SuppressLint("MissingPermission")
     private fun reconnectToSavedDevice() {
-        if ((!appInForeground && !backgroundCollectionEnabled) || autoConnecting || mockChargingSample) return
+        if ((!appInForeground && !backgroundCollectionEnabled) || gatt != null || mockChargingSample || automaticReconnectBlocked) return
         if (!hasAllRequiredPermissions() || !isBluetoothEnabled()) return
         val address = connectedAddress ?: autoReconnectAddress ?: return
         if (!BluetoothAdapter.checkBluetoothAddress(address)) return
@@ -906,14 +960,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun scheduleBleReconnect() {
-        if (!appInForeground && !backgroundCollectionEnabled) return
+        if (automaticReconnectBlocked || (!appInForeground && !backgroundCollectionEnabled)) return
         uiHandler.removeCallbacks(bleReconnectTask)
         uiHandler.postDelayed(bleReconnectTask, BLE_RECONNECT_DELAY_MS)
     }
 
     @SuppressLint("MissingPermission")
     private fun triggerBleAutoReconnect() {
-        if (!hasAllRequiredPermissions()) return
+        if (!hasAllRequiredPermissions() || !isBluetoothEnabled()) return
         val address = connectedAddress ?: gatt?.device?.address ?: autoReconnectAddress ?: return
         if (!BluetoothAdapter.checkBluetoothAddress(address)) return
         val device = try {
@@ -921,9 +975,8 @@ class MainActivity : ComponentActivity() {
         } catch (_: IllegalArgumentException) {
             return
         }
-        bleAutoReconnecting = true
         autoConnecting = true
-        setStatus("3秒未收到蓝牙数据，自动重连中...")
+        setStatus("蓝牙数据或连接超时，自动重连中...")
         connectToDevice(device)
     }
 
@@ -939,6 +992,8 @@ class MainActivity : ComponentActivity() {
         }
         if (scanning) stopScan()
         disconnectGatt()
+        automaticReconnectBlocked = false
+        autoConnecting = true
         authenticated = false
         frameBuffer.clear()
         resetCellRequestState()
@@ -949,7 +1004,8 @@ class MainActivity : ComponentActivity() {
         bleActivityFlash = false
         bleSignalRssi = deviceItems.firstOrNull { it.device.address == device.address }?.rssi
         connectedAddress = device.address
-        lastBleDataAtMs = System.currentTimeMillis()
+        lastBleDataAtMs = 0L
+        connectionStartedAtMs = SystemClock.elapsedRealtime()
         setStatus("正在连接 ${formatDevice(device)} ...")
         gatt = try {
             device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
@@ -958,11 +1014,11 @@ class MainActivity : ComponentActivity() {
         }
         if (gatt == null) {
             autoConnecting = false
-            bleAutoReconnecting = false
             connectedAddress = null
             setStatus("蓝牙连接启动失败，稍后重试。")
             scheduleBleReconnect()
         }
+        startBleWatchdog()
     }
 
     @SuppressLint("MissingPermission")
@@ -972,9 +1028,14 @@ class MainActivity : ComponentActivity() {
         uiHandler.removeCallbacks(pollRssiTask)
         uiHandler.removeCallbacks(clearBleFlashTask)
         stopBleWatchdog()
-        gatt?.disconnect()
-        gatt?.close()
+        val oldGatt = gatt
         gatt = null
+        runCatching { oldGatt?.disconnect() }
+        runCatching { oldGatt?.close() }
+        authenticated = false
+        autoConnecting = false
+        frameBuffer.clear()
+        appendChartGap()
         writeCharacteristic = null
         notifyCharacteristic = null
         resetCellRequestState()
@@ -1005,7 +1066,6 @@ class MainActivity : ComponentActivity() {
         override fun onConnectionStateChange(callbackGatt: BluetoothGatt, status: Int, newState: Int) {
             withActiveGatt(callbackGatt) {
                 if (newState == BluetoothGatt.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                    bleAutoReconnecting = false
                     bleConnected = true
                     connectedAddress = callbackGatt.device.address
                     uiHandler.removeCallbacks(pollRssiTask)
@@ -1015,7 +1075,6 @@ class MainActivity : ComponentActivity() {
                 } else if (newState == BluetoothGatt.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
                     val reconnectAddress = callbackGatt.device.address
                     setStatus("蓝牙已断开，等待自动恢复。")
-                    bleAutoReconnecting = false
                     authenticated = false
                     resetCellRequestState()
                     autoConnecting = false
@@ -1036,8 +1095,11 @@ class MainActivity : ComponentActivity() {
                     bleSignalRssi = null
                     bleActivityFlash = false
                     connectedAddress = null
-                    if (autoReconnectAddress == null) autoReconnectAddress = reconnectAddress
+                    lastBleDataAtMs = 0L
+                    appendChartGap()
+                    autoReconnectAddress = reconnectAddress
                     scheduleBleReconnect()
+                    startBleWatchdog()
                 }
             }
         }
@@ -1138,7 +1200,6 @@ class MainActivity : ComponentActivity() {
 
     private fun onNotifyBytes(chunk: ByteArray) {
         markBleActivity()
-        lastBleDataAtMs = System.currentTimeMillis()
         if (chunk.size >= 4 && chunk[0] == 0x55.toByte() && chunk[1] == 0xAA.toByte() &&
             chunk[2] == 0xEB.toByte() && chunk[3] == 0x90.toByte()
         ) {
@@ -1170,7 +1231,6 @@ class MainActivity : ComponentActivity() {
                 if (authenticated) {
                     setStatus("密码校验通过。设备: $deviceName，开始读取状态数据...")
                     autoConnecting = false
-                    bleAutoReconnecting = false
                     val connectedAddress = gatt?.device?.address ?: selectedDevice?.address
                     if (!connectedAddress.isNullOrBlank()) {
                         autoReconnectAddress = connectedAddress
@@ -1186,6 +1246,7 @@ class MainActivity : ComponentActivity() {
                     startBleWatchdog()
                 } else {
                     autoConnecting = false
+                    automaticReconnectBlocked = true
                     stopBleWatchdog()
                     setStatus("密码校验失败。设备密码不匹配，无法读取状态数据。")
                 }
@@ -1194,6 +1255,7 @@ class MainActivity : ComponentActivity() {
             FRAME_TYPE_CELL_INFO -> {
                 if (!authenticated) return
                 val parsed = parseCellInfo(frame)
+                lastBleDataAtMs = SystemClock.elapsedRealtime()
                 lastRealMetrics = parsed
                 if (!mockChargingSample) {
                     acceptMetrics(parsed)
@@ -1416,16 +1478,19 @@ class MainActivity : ComponentActivity() {
         return if (value.isFinite() && value > 0f) value else fallback
     }
 
+    private fun parseChartSource(raw: String?, fallback: ChartMetricSource): ChartMetricSource =
+        ChartMetricSource.entries.firstOrNull { it.name == raw } ?: fallback
+
     private fun startChartRecording() {
         if (chartPlayback) {
             chartPlayback = false
         }
-        chartSamples = emptyList()
         chartRecording = true
         setStatus("图表录制已开始。")
     }
 
     private fun stopChartRecording(silent: Boolean = false) {
+        appendChartGap()
         chartRecording = false
         if (!silent) {
             setStatus("图表录制已停止，可回显最近一分钟数据。")
@@ -1434,6 +1499,19 @@ class MainActivity : ComponentActivity() {
 
     private fun appendTrendSample(sample: TrendSample) {
         chartSamples = (chartSamples + sample).takeLast(MAX_CHART_SAMPLES)
+    }
+
+    private fun appendChartGap() {
+        val previous = chartSamples.lastOrNull() ?: return
+        if (chartRecording && (previous.voltage != null || previous.speedKmh != null)) {
+            appendTrendSample(TrendSample(timestampMs = System.currentTimeMillis()))
+        }
+    }
+
+    private fun currentChartSpeed(): Float? {
+        if (!gpsEnabled || gpsSignalState != GpsSignalState.READY) return null
+        if (!mockChargingSample && (!gpsUpdating || System.currentTimeMillis() - lastGpsUpdateAtMs > GPS_FIX_TIMEOUT_MS)) return null
+        return gpsSpeedKmh?.takeIf { it.isFinite() && it in 0f..GPS_ENERGY_MAX_SPEED_KMH }
     }
 
     private fun acceptMetrics(metrics: ParsedMetrics) {
@@ -1454,7 +1532,8 @@ class MainActivity : ComponentActivity() {
                     voltage = metrics.totalVoltage,
                     current = metrics.current,
                     power = metrics.power,
-                    soc = metrics.soc.toFloat()
+                    soc = metrics.soc.toFloat(),
+                    speedKmh = currentChartSpeed()
                 )
             )
         }
@@ -1462,6 +1541,8 @@ class MainActivity : ComponentActivity() {
 
     private fun startMockDriving() {
         persistTotalEnergy(force = true)
+        viewModel.energyBeforeMock = viewModel.energyState
+        appendChartGap()
         mockChargingSample = true
         stopGpsUpdates()
         viewModel.energyTracker.setAccumulateTotal(false)
@@ -1475,8 +1556,8 @@ class MainActivity : ComponentActivity() {
             startChartRecording()
         }
         val first = buildMockDrivingMetrics(mockDriveTick++)
-        acceptMetrics(first)
         updateMockGpsState(0)
+        acceptMetrics(first)
         uiHandler.removeCallbacks(mockDriveTask)
         uiHandler.post(mockDriveTask)
         showToast("MOCK行车已启动")
@@ -1484,15 +1565,22 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopMockDriving() {
+        appendChartGap()
         mockChargingSample = false
         lastMockPhase = null
         uiHandler.removeCallbacks(mockDriveTask)
         viewModel.energyTracker.resetSession()
         viewModel.energyTracker.setAccumulateTotal(true)
-        lastRealMetrics?.let(::acceptMetrics)
+        viewModel.energyBeforeMock?.let(viewModel.energyTracker::restoreLastSession)
+        viewModel.energyBeforeMock = null
+        latestMetrics = null
+        if (authenticated && SystemClock.elapsedRealtime() - lastBleDataAtMs < BLE_DATA_TIMEOUT_MS) {
+            lastRealMetrics?.let(::acceptMetrics)
+        }
         gpsSpeedKmh = null
         viewModel.energyTracker.invalidateLocation()
         applyGpsTrackingState(forceRestart = true)
+        recoverBleSessionOnForeground()
         showToast("MOCK行车已停止")
         setStatus("已停止 MOCK 行车数据。")
     }
@@ -1637,11 +1725,12 @@ class MainActivity : ComponentActivity() {
         val now = SystemClock.elapsedRealtime()
         if (!force && now - lastTotalPersistAtMs < TOTAL_PERSIST_INTERVAL_MS) return
         val state = viewModel.energyState
-        prefs.edit()
+        val editor = prefs.edit()
             .putFloat(PREF_TOTAL_DISCHARGED_AH, state.totalDischargedAh)
             .putFloat(PREF_TOTAL_RECOVERED_AH, state.totalRecoveredAh)
             .putFloat(PREF_TOTAL_DISTANCE_KM, state.totalDistanceKm)
-            .apply()
+        if (!mockChargingSample) energyHistory.write(state, editor)
+        editor.apply()
         lastTotalPersistAtMs = now
     }
 
@@ -1709,6 +1798,10 @@ class MainActivity : ComponentActivity() {
     )
 
     private fun applyGpsTrackingState(forceRestart: Boolean = false) {
+        if (!appInForeground && !backgroundCollectionEnabled) {
+            stopGpsUpdates()
+            return
+        }
         if (!gpsEnabled) {
             stopGpsUpdates()
             updateGpsSignalState(GpsSignalState.OFF)
@@ -1800,6 +1893,9 @@ class MainActivity : ComponentActivity() {
         private const val PREF_TOTAL_DISCHARGED_AH = "pref_total_discharged_ah"
         private const val PREF_TOTAL_RECOVERED_AH = "pref_total_recovered_ah"
         private const val PREF_TOTAL_DISTANCE_KM = "pref_total_distance_km"
+        private const val PREF_CHART_SOURCE = "pref_chart_source"
+        private const val PREF_SECOND_CHART_SOURCE = "pref_second_chart_source"
+        private const val PREF_SECOND_CHART_ENABLED = "pref_second_chart_enabled"
 
         private const val MIN_FRAME_SIZE = 300
         private const val MAX_FRAME_SIZE = 420
@@ -1811,7 +1907,7 @@ class MainActivity : ComponentActivity() {
         private const val COMMAND_CELL_INFO = 0x96
         private const val COMMAND_DEVICE_INFO = 0x97
         private const val PREF_GPS_ENABLED = "pref_gps_enabled"
-        private const val BLE_DATA_TIMEOUT_MS = 3_000L
+        private const val BLE_DATA_TIMEOUT_MS = BleRecoveryPolicy.DATA_TIMEOUT_MS
         private const val BLE_WATCHDOG_INTERVAL_MS = 1_000L
         private const val BLE_RECONNECT_DELAY_MS = 1_500L
         private const val BLE_FOREGROUND_RECOVERY_DEBOUNCE_MS = 500L

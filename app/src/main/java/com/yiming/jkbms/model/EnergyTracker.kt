@@ -52,6 +52,7 @@ class EnergyTracker(
     private var totalDistanceKm = 0.0
     private var accumulateTotal = true
     private var totalRestored = false
+    private var historical = false
 
     private val pendingStart = PendingTotals()
     private val pendingPause = PendingTotals()
@@ -174,6 +175,22 @@ class EnergyTracker(
     fun invalidateBmsContinuity() {
         lastCurrentA = null
         lastCurrentAtMs = null
+        // A BMS outage also invalidates distance and the rolling efficiency window.
+        invalidateLocation()
+    }
+
+    @Synchronized
+    fun restoreLastSession(state: EnergyUiState) {
+        resetSession()
+        tripDischargedAh = state.tripDischargedAh.validTotalValue()
+        tripRecoveredAh = state.tripRecoveredAh.validTotalValue()
+        tripDistanceKm = state.tripDistanceKm.validTotalValue()
+        sessionDischargedAh = state.sessionDischargedAh.validTotalValue()
+        sessionRecoveredAh = state.sessionRecoveredAh.validTotalValue()
+        sessionDistanceKm = state.sessionDistanceKm.validTotalValue()
+        remainingAh = state.remainingAh?.takeIf { it.isFinite() && it >= 0f }?.toDouble()
+        historical = tripDistanceKm > 0.0 || tripDischargedAh > 0.0 || tripRecoveredAh > 0.0
+        publish()
     }
 
     @Synchronized
@@ -202,6 +219,7 @@ class EnergyTracker(
 
     @Synchronized
     fun resetSession() {
+        historical = false
         motionState = TripMotionState.IDLE
         energyIntegrationEnabled = false
         startCandidateAtMs = null
@@ -273,6 +291,12 @@ class EnergyTracker(
     }
 
     private fun beginTrip() {
+        if (historical) {
+            sessionDischargedAh = pendingStart.dischargedAh
+            sessionRecoveredAh = pendingStart.recoveredAh
+            sessionDistanceKm = pendingStart.distanceKm
+            historical = false
+        }
         tripDischargedAh = pendingStart.dischargedAh
         tripRecoveredAh = pendingStart.recoveredAh
         tripDistanceKm = pendingStart.distanceKm
@@ -399,6 +423,7 @@ class EnergyTracker(
 
         onStateChanged(
             EnergyUiState(
+                isHistorical = historical,
                 motionState = motionState,
                 tripNetAh = tripNet.toFloat(),
                 tripDischargedAh = visibleDischarged.toFloat(),
@@ -406,6 +431,8 @@ class EnergyTracker(
                 tripDistanceKm = visibleDistance.toFloat(),
                 tripKmPerAh = tripEfficiency?.toFloat(),
                 sessionNetAh = sessionNet.toFloat(),
+                sessionDischargedAh = sessionDischargedAh.toFloat(),
+                sessionRecoveredAh = sessionRecoveredAh.toFloat(),
                 sessionDistanceKm = sessionDistanceKm.toFloat(),
                 sessionKmPerAh = sessionEfficiency?.toFloat(),
                 totalNetAh = totalNet.toFloat(),

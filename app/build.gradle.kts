@@ -14,14 +14,26 @@ android {
         applicationId = "com.yiming.jkbms"
         minSdk = 27
         targetSdk = 36
-        versionCode = 17
-        versionName = "1.2.8"
+        versionCode = 18
+        versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    val releaseKeyStore = providers.environmentVariable("JKBMS_KEYSTORE_PATH").orNull
+    if (!releaseKeyStore.isNullOrBlank()) {
+        signingConfigs.create("distribution") {
+            storeFile = file(releaseKeyStore)
+            storePassword = providers.environmentVariable("JKBMS_KEYSTORE_PASSWORD").get()
+            keyAlias = providers.environmentVariable("JKBMS_KEY_ALIAS").get()
+            keyPassword = providers.environmentVariable("JKBMS_KEY_PASSWORD").get()
+        }
+    }
     buildTypes {
         release {
+            if (!releaseKeyStore.isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("distribution")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -54,5 +66,8 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

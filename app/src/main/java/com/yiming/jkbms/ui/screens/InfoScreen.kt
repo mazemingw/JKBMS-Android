@@ -45,10 +45,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -58,6 +60,8 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -346,10 +350,10 @@ private fun BigMetricCard(
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(item.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = resolvedTitleColor)
-                Text(
-                    text = buildBigMetricValueText(item.value),
+                MetricValueText(
+                    value = item.value,
+                    unit = item.badgeText,
                     style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
                     color = item.valueColor
                 )
                 if (item.subtitle != null || item.keepSubtitleSpace) {
@@ -392,7 +396,9 @@ private fun EnergyOverviewCard(
     hasBmsData: Boolean,
     gpsSignalState: GpsSignalState
 ) {
-    var mode by remember { mutableStateOf(EnergyCardMode.CHART) }
+    var mode by rememberSaveable { mutableStateOf(EnergyCardMode.TRIP_A) }
+    val hasTripData = energyState.tripDistanceKm > 0f || energyState.tripDischargedAh > 0f || energyState.tripRecoveredAh > 0f
+    val useTotalFallback = !hasTripData && energyState.totalDistanceKm > 0f
     val green = Color(0xFF41CD52)
     val chartPoints = remember(energyState.trend) {
         energyState.trend.map { EChartPoint(it.timestampMs, it.kmPerAh) }
@@ -411,7 +417,8 @@ private fun EnergyOverviewCard(
     }
     val headlineDistance = when (mode) {
         EnergyCardMode.TOTAL -> energyState.totalDistanceKm
-        EnergyCardMode.CHART, EnergyCardMode.TRIP_A -> energyState.tripDistanceKm
+        EnergyCardMode.TRIP_A -> if (useTotalFallback) energyState.totalDistanceKm else energyState.tripDistanceKm
+        EnergyCardMode.CHART -> energyState.tripDistanceKm
     }
     val nextMode = {
         mode = when (mode) {
@@ -456,13 +463,17 @@ private fun EnergyOverviewCard(
 
             when (mode) {
                 EnergyCardMode.TRIP_A -> EnergyStatsPanel(
-                    distanceLabel = "本次里程",
-                    distance = energyState.tripDistanceKm,
-                    energyLabel = "本次耗电",
-                    netAh = energyState.tripNetAh,
-                    efficiencyLabel = "单次能效",
-                    efficiency = energyState.tripKmPerAh,
-                    footer = "回收 ${formatAmpHours(energyState.tripRecoveredAh)}  ·  预计里程 ${formatRange(energyState.estimatedRangeKm)}",
+                    distanceLabel = if (useTotalFallback) "累计里程" else if (energyState.isHistorical) "上次里程" else "本次里程",
+                    distance = if (useTotalFallback) energyState.totalDistanceKm else energyState.tripDistanceKm,
+                    energyLabel = if (useTotalFallback) "累计耗电" else if (energyState.isHistorical) "上次耗电" else "本次耗电",
+                    netAh = if (useTotalFallback) energyState.totalNetAh else energyState.tripNetAh,
+                    efficiencyLabel = if (useTotalFallback) "平均能效" else "单次能效",
+                    efficiency = energyState.tripKmPerAh ?: energyState.totalKmPerAh,
+                    footer = if (energyState.isHistorical) {
+                        "上次行程 · 回收 ${formatAmpHours(energyState.tripRecoveredAh)} · 参考续航 ${formatRange(energyState.estimatedRangeKm)}"
+                    } else {
+                        "回收 ${formatAmpHours(energyState.tripRecoveredAh)} · 预计里程 ${formatRange(energyState.estimatedRangeKm)}"
+                    },
                     green = green,
                     isDark = isDark,
                     modifier = Modifier.fillMaxSize()
@@ -1015,10 +1026,10 @@ private fun GaugeMetricCard(
                     .padding(bottom = 6.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(
-                    text = buildBigMetricValueText(item.value),
+                MetricValueText(
+                    value = item.value,
+                    unit = item.badgeText,
                     style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
                     color = gaugeValueColor,
                     textAlign = TextAlign.Center
                 )
@@ -1081,10 +1092,10 @@ private fun SmallTopMetricCard(
                     style = MaterialTheme.typography.labelMedium,
                     color = item.titleColor ?: MaterialTheme.colorScheme.onSurface
                 )
-                    Text(
-                        buildBigMetricValueText(item.value),
+                    MetricValueText(
+                        value = item.value,
+                        unit = item.badgeText,
                         style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
                         color = item.valueColor
                     )
                     Text(
@@ -1315,15 +1326,12 @@ private fun TopStatusRow(
                             modifier = Modifier.align(Alignment.Center),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Text(
-                                text = speedValueText,
+                            MetricValueText(
+                                value = speedValueText,
+                                unit = "km/h",
                                 style = MaterialTheme.typography.headlineSmall,
-                                color = if (isDark) Color(0xFF41CD52) else Color(0xFF2E7D32)
-                            )
-                            Text(
-                                text = "KM/h",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f)
+                                color = if (isDark) Color(0xFF41CD52) else Color(0xFF2E7D32),
+                                textAlign = TextAlign.Center
                             )
                         }
                     } else {
@@ -1486,24 +1494,54 @@ private fun buildRemainingCapacityHint(metrics: ParsedMetrics?): String {
     return "剩余容量 ${format3(metrics.capacityRemainingAh)} Ah"
 }
 
+@Composable
+private fun MetricValueText(
+    value: String,
+    unit: String,
+    style: TextStyle,
+    color: Color,
+    textAlign: TextAlign = TextAlign.Start
+) {
+    val text = remember(value, unit) { buildBigMetricValueText("$value\u00A0$unit") }
+    val measurer = rememberTextMeasurer()
+    var availablePx by remember { mutableStateOf(0) }
+    val boldStyle = style.copy(fontWeight = FontWeight.Bold)
+    val measuredPx = measurer.measure(text, boldStyle, softWrap = false).size.width.coerceAtLeast(1)
+    val scale = if (availablePx > 0) (availablePx.toFloat() / measuredPx).coerceIn(0.1f, 1f) else 1f
+    Box(Modifier.fillMaxWidth().onSizeChanged { availablePx = it.width }) {
+        Text(
+            text = text,
+            modifier = Modifier.fillMaxWidth(),
+            style = boldStyle.copy(fontSize = boldStyle.fontSize * scale),
+            color = color,
+            maxLines = 1,
+            softWrap = false,
+            textAlign = textAlign
+        )
+    }
+}
+
 private fun buildBigMetricValueText(value: String): AnnotatedString {
-    val numberEnd = value.indexOf(' ').takeIf { it > 0 } ?: value.length
+    val numberEnd = value.indexOfFirst { it.isWhitespace() }.takeIf { it > 0 } ?: value.length
     val numberPart = value.substring(0, numberEnd)
     val dotIndex = numberPart.indexOf('.')
-    if (dotIndex < 0) return AnnotatedString(value)
-
     var decimalEnd = dotIndex + 1
     while (decimalEnd < numberPart.length && numberPart[decimalEnd].isDigit()) {
         decimalEnd++
     }
-    if (decimalEnd <= dotIndex + 1) return AnnotatedString(value)
-
     return buildAnnotatedString {
-        append(value.substring(0, dotIndex + 1))
-        withStyle(SpanStyle(fontSize = 0.72.em)) {
-            append(value.substring(dotIndex + 1, decimalEnd))
+        if (dotIndex >= 0 && decimalEnd > dotIndex + 1) {
+            append(numberPart.substring(0, dotIndex + 1))
+            withStyle(SpanStyle(fontSize = 0.72.em)) {
+                append(numberPart.substring(dotIndex + 1, decimalEnd))
+            }
+            append(numberPart.substring(decimalEnd))
+        } else {
+            append(numberPart)
         }
-        append(value.substring(decimalEnd))
+        withStyle(SpanStyle(fontSize = 0.5.em)) {
+            append(value.substring(numberEnd))
+        }
     }
 }
 

@@ -10,6 +10,61 @@ import org.junit.Test
 
 class EnergyTrackerTest {
     @Test
+    fun savedTripIsVisibleImmediatelyWithoutRestoringIntegrationClocks() {
+        var state = EnergyUiState()
+        val tracker = EnergyTracker { state = it }
+        tracker.restoreTotal(2f, 0.5f, 6f)
+        tracker.restoreLastSession(EnergyUiState(
+            tripDischargedAh = 1.2f, tripRecoveredAh = 0.2f, tripDistanceKm = 3.6f,
+            sessionDischargedAh = 1.2f, sessionRecoveredAh = 0.2f, sessionDistanceKm = 3.6f,
+            remainingAh = 10f
+        ))
+        assertTrue(state.isHistorical)
+        assertEquals(3.6f, state.tripDistanceKm, 0f)
+        assertEquals(1f, state.tripNetAh, 0.0001f)
+        assertEquals(3.6f, state.tripKmPerAh!!, 0.0001f)
+        assertEquals(36f, state.estimatedRangeKm!!, 0.001f)
+        tracker.setCollecting(true)
+        tracker.onBmsSample(-100f, 10f, 1_000_000L, 1_000_000L)
+        assertEquals(1f, state.tripNetAh, 0.0001f)
+
+        for (second in 0..5) {
+            val time = 1_001_000L + second * 1_000L
+            tracker.onSpeedSample(36f, time, time)
+            tracker.onBmsSample(-10f, 10f, time, time)
+        }
+        assertTrue(!state.isHistorical)
+        assertTrue(state.tripDistanceKm < 0.1f)
+        assertTrue(state.tripNetAh < 0.02f)
+        assertTrue(state.totalDistanceKm > 6f)
+        assertTrue(state.totalDistanceKm < 6.1f)
+    }
+
+    @Test
+    fun bmsLossRequiresFreshGpsBaselinesAndDoesNotBridgeEnergyOrDistance() {
+        var state = EnergyUiState()
+        val tracker = EnergyTracker { state = it }
+        tracker.setCollecting(true)
+        for (second in 0..10) {
+            val time = second * 1_000L
+            tracker.onSpeedSample(36f, time, time)
+            tracker.onBmsSample(-30f, 10f, time, time)
+        }
+        val before = state
+        tracker.invalidateBmsContinuity()
+        tracker.onBmsSample(-30f, 10f, 13_000L, 13_000L)
+        tracker.onSpeedSample(36f, 13_000L, 13_000L)
+        tracker.onBmsSample(-30f, 10f, 13_000L, 13_000L)
+        assertEquals(before.tripNetAh, state.tripNetAh, 0.00001f)
+        assertEquals(before.tripDistanceKm, state.tripDistanceKm, 0.00001f)
+        tracker.onSpeedSample(36f, 14_000L, 14_000L)
+        tracker.onBmsSample(-30f, 10f, 14_000L, 14_000L)
+        assertEquals(before.tripNetAh, state.tripNetAh, 0.00001f)
+        tracker.onBmsSample(-30f, 10f, 14_500L, 14_500L)
+        assertEquals(30f * 0.5f / 3_600f, state.tripNetAh - before.tripNetAh, 0.0001f)
+    }
+
+    @Test
     fun tenAmpsForSixMinutesAtThirtySixKmh_isOneAhForThreePointSixKm() {
         var state = EnergyUiState()
         val tracker = EnergyTracker { state = it }

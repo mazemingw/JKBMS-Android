@@ -4,6 +4,28 @@
 
 This file records major user-visible changes to JKBMS-Android.
 
+## 1.3.0 (18) - 2026-11-18
+
+### Fixes and Energy
+
+- Fixed #1: fullscreen phones no longer enter compact mode accidentally. Compact information mode has a restore-navigation button and a system Back escape.
+- Added a 15-second timeout for connection, service discovery, authentication, and initial battery data. Foreground recovery checks stalled sessions immediately.
+- Only CRC-validated battery frames refresh the 3-second data timeout. Disconnects clear stale readings and break current, distance, and efficiency continuity.
+- Persisted the previous trip, session statistics, and remaining capacity. The energy panel shows saved values immediately without restoring integration clocks.
+- Kept dashboard values and units on one line, scaling text to fit narrow cards.
+
+### Charts
+
+- Recording starts automatically and includes GPS speed, which can be recorded independently while the BMS is offline.
+- Added single/dual ECharts with independently selectable voltage, current, power, SOC, or speed sources. Choices persist across restarts.
+- Snapshot playback continues live recording. Resuming preserves samples; invalid speed and disconnections create gaps.
+
+### Distribution
+
+- Switched to a new release key: **1.3.0 cannot update 1.2.8 or older debug builds in place**. Back up needed information before uninstalling; uninstalling clears local data.
+- Provided a signed APK verified with APK Signature Scheme v2. Release signing uses environment variables; keys and passwords remain outside the repository.
+
+
 ## 1.2.8 (17) - 2026-09-07
 
 ### TRIP A and TOTAL
